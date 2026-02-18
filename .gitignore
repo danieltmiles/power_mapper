@@ -1,0 +1,8 @@
+venv
+uploads
+transcriptions.db
+pretrained_models
+.idea
+*.pyc
+hf_token.txt
+solr_config.json
