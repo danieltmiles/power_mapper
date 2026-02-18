@@ -1,4 +1,4 @@
-# Transcribinator Pipeline
+# Power Mapper Pipeline
 
 A comprehensive audio transcription and analysis pipeline for processing YouTube videos through multiple AI services.
 
