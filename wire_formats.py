@@ -222,13 +222,29 @@ class WhisperTimings(Dictable):
 
 @dataclass
 class WhisperResult(Dictable):
-    transcript: str
+    transcript: dict
     speaker: str
     timings: WhisperTimings
     transcript_metadata: TranscriptMetadata
     segment_count: int
     total_segments: int
 
+    def __init__(
+        self,
+        *,
+        transcript: dict,
+        speaker: str,
+        timings: WhisperTimings | dict,
+        transcript_metadata: TranscriptMetadata | dict,
+        segment_count: int,
+        total_segments: int
+    ):
+        self.transcript = transcript
+        self.speaker = speaker
+        self.timings = timings if isinstance(timings, WhisperTimings) else WhisperTimings(**timings)
+        self.transcript_metadata = transcript_metadata if isinstance(transcript_metadata, TranscriptMetadata) else TranscriptMetadata(**transcript_metadata)
+        self.segment_count = segment_count
+        self.total_segments = total_segments
     def asdict(self) -> dict[str, Any]:
         return {
             "transcript": self.transcript,

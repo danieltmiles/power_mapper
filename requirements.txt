@@ -7,3 +7,4 @@ webdavclient3
 pydub
 pydub-ffmpeg-wav
 openai-whisper
+llama-cpp-python
