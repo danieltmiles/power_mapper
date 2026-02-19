@@ -1,6 +1,8 @@
 import datetime
 from dataclasses import dataclass, asdict, field
 from typing import Protocol, Any
+
+import serialization
 from serialization import dumps, load
 
 
@@ -134,8 +136,56 @@ class DiarizationResponse(Dictable):
     diarization: str
     transcript_metadata: TranscriptMetadata
 
+    def __init__(self, *args, **kwargs):
+        if args:
+            raise ValueError("DiarizationResponse should be initialized with keyword arguments only")
+        diarization = kwargs.get("diarization")
+        # BUG: old versions of this class improperly serialized the diarization data under the key "diarization_data"
+        if not diarization and "diarization_data" in kwargs:
+            diarization = kwargs["diarization_data"]
+        self.diarization = diarization
+        self.transcript_metadata = TranscriptMetadata(**kwargs["transcript_metadata"])
+
     def asdict(self) -> dict[str, Any]:
         return {
             "transcript_metadata": self.transcript_metadata.asdict(),
-            "diarization_data": self.diarization,
+            "diarization": self.diarization,
+        }
+
+
+@dataclass
+class WhisperJobAudioSegment(Dictable):
+    audio: list[float]
+    start: float
+    end: float
+    speaker: str
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "audio": self.audio,
+            "start": self.start,
+            "end": self.end,
+            "speaker": self.speaker
+        }
+
+
+@dataclass
+class WhisperJobDescription(Dictable):
+    audio_segment: WhisperJobAudioSegment
+    segment_count: int
+    total_segments: int
+    transcript_metadata: TranscriptMetadata
+    temperature: float = 0.2
+    language: str = "en"
+    word_timestamps: bool = True
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "audio_segment": self.audio_segment.asdict(),
+            "segment_count": self.segment_count,
+            "total_segments": self.total_segments,
+            "transcript_metadata": self.transcript_metadata.asdict(),
+            "temperature": self.temperature,
+            "language": self.language,
+            "word_timestamps": self.word_timestamps
         }
