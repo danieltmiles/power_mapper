@@ -2,3 +2,7 @@ aio_pika
 transformers
 torch
 torchaudio
+pyannote.audio
+webdavclient3
+pydub
+pydub-ffmpeg-wav

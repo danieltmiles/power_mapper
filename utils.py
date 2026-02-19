@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import re
 import subprocess
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 
 import torch
 import torchaudio
+from pydub import AudioSegment
 from torch import Tensor
 from transformers import AutoTokenizer
 
@@ -81,10 +83,7 @@ def assign_speaker_to_segment(diarization, segment_start, segment_end):
 
 
 def normalize_audio(audio_file_path: str) -> tuple[Tensor, int]:
-    import io
-    import numpy as np
-    from pydub import AudioSegment
-    
+
     file_extension = os.path.splitext(audio_file_path)[1].lower()
     print(f"Loading audio file {audio_file_path}")
     
@@ -523,3 +522,28 @@ class SimilarityCalculator:
         semantic_sim = self.semantic_similarity(text1, text2)
         return 0.5 * simple_sim + 0.5 * jaccard_sim + 2 * semantic_sim / 3
 
+
+def load_hf_token(token_file="hf_token.txt"):
+    """Load HuggingFace token from a file.
+
+    Args:
+        token_file: Path to the token file (default: hf_token.txt)
+
+    Returns:
+        str: The token string
+
+    Raises:
+        FileNotFoundError: If the token file doesn't exist
+        ValueError: If the token file is empty
+    """
+    token_path = os.path.join(os.path.dirname(__file__), token_file)
+    if not os.path.exists(token_path):
+        raise FileNotFoundError(f"Token file not found: {token_path}")
+
+    with open(token_path, 'r') as f:
+        token = f.read().strip()
+
+    if not token:
+        raise ValueError(f"Token file is empty: {token_path}")
+
+    return token

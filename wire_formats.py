@@ -128,3 +128,14 @@ class TranscriptMetadata(Dictable):
             "date": self.date.isoformat() if self.date else None,
             "video_id": self.video_id
         }
+
+@dataclass
+class DiarizationResponse(Dictable):
+    diarization: str
+    transcript_metadata: TranscriptMetadata
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "transcript_metadata": self.transcript_metadata.asdict(),
+            "diarization_data": self.diarization,
+        }

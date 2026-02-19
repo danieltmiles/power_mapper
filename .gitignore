@@ -5,4 +5,4 @@ pretrained_models
 .idea
 *.pyc
 hf_token.txt
-solr_config.json
+*_config.json
