@@ -179,6 +179,25 @@ class WhisperJobDescription(Dictable):
     language: str = "en"
     word_timestamps: bool = True
 
+    def __init__(
+        self,
+        *,
+        audio_segment: WhisperJobAudioSegment | dict,
+        segment_count: int,
+        total_segments: int,
+        transcript_metadata: TranscriptMetadata | dict,
+        temperature: float = 0.2,
+        language: str = "en",
+        word_timestamps: bool = True,
+    ):
+        self.audio_segment = audio_segment if isinstance(audio_segment, WhisperJobAudioSegment) else WhisperJobAudioSegment(**audio_segment)
+        self.segment_count = segment_count
+        self.total_segments = total_segments
+        self.transcript_metadata = transcript_metadata if isinstance(transcript_metadata, TranscriptMetadata) else TranscriptMetadata(**transcript_metadata)
+        self.temperature = temperature
+        self.language = language
+        self.word_timestamps = word_timestamps
+
     def asdict(self) -> dict[str, Any]:
         return {
             "audio_segment": self.audio_segment.asdict(),
@@ -188,4 +207,34 @@ class WhisperJobDescription(Dictable):
             "temperature": self.temperature,
             "language": self.language,
             "word_timestamps": self.word_timestamps
+        }
+
+@dataclass
+class WhisperTimings(Dictable):
+    start: float
+    end: float
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "start": self.start,
+            "end": self.end
+        }
+
+@dataclass
+class WhisperResult(Dictable):
+    transcript: str
+    speaker: str
+    timings: WhisperTimings
+    transcript_metadata: TranscriptMetadata
+    segment_count: int
+    total_segments: int
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "transcript": self.transcript,
+            "speaker": self.speaker,
+            "timings": self.timings.asdict(),
+            "transcript_metadata": self.transcript_metadata.asdict(),
+            "segment_count": self.segment_count,
+            "total_segments": self.total_segments
         }

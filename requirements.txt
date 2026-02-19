@@ -6,3 +6,4 @@ pyannote.audio
 webdavclient3
 pydub
 pydub-ffmpeg-wav
+openai-whisper
