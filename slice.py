@@ -277,11 +277,10 @@ class AssembleDiarizationService:
             check_interval: Seconds to wait between checks
         """
         while True:
-            # Use passive=True to inspect queue without modifying it
+            # Declare queue to get fresh statistics (declaring existing durable queue is idempotent)
             queue_info = await channel.declare_queue(
                 self.destination_queue,
                 durable=True,
-                passive=True
             )
             message_count = queue_info.declaration_result.message_count
 
@@ -304,10 +303,7 @@ class AssembleDiarizationService:
         print(f"  Whisper job ID: {whisper_job_id}")
 
         for i, segment in enumerate(segments_list):
-            # Apply back-pressure every 10 messages to avoid overwhelming the queue
-            if i > 0 and i % 10 == 0:
-                await self.wait_for_queue_backpressure(channel)
-            
+
             # Create job message matching ai.py's format
             job_desc = WhisperJobDescription(
                 audio_segment=WhisperJobAudioSegment(
@@ -331,7 +327,8 @@ class AssembleDiarizationService:
             
             if (i + 1) % 10 == 0 or (i + 1) == total_segments:
                 print(f"  Sent {i + 1}/{total_segments} whisper jobs")
-        
+                await self.wait_for_queue_backpressure(channel)
+
         print(f"✓ Successfully sent all {total_segments} whisper jobs")
 
     async def run(self) -> None:
