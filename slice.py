@@ -260,6 +260,37 @@ class AssembleDiarizationService:
                 os.remove(temp_audio_path)
                 print(f"Cleaned up temporary file: {temp_audio_path}")
     
+    async def wait_for_queue_backpressure(
+        self,
+        channel: aio_pika.abc.AbstractRobustChannel,
+        max_messages: int = 1000,
+        check_interval: float = 2.0,
+    ) -> None:
+        """
+        Wait until the destination queue has fewer than max_messages.
+        
+        This implements back-pressure to prevent overwhelming the queue.
+        
+        Args:
+            channel: RabbitMQ channel
+            max_messages: Maximum number of messages to allow in queue
+            check_interval: Seconds to wait between checks
+        """
+        while True:
+            # Use passive=True to inspect queue without modifying it
+            queue_info = await channel.declare_queue(
+                self.destination_queue,
+                durable=True,
+                passive=True
+            )
+            message_count = queue_info.declaration_result.message_count
+
+            if message_count < max_messages:
+                return
+            
+            print(f"  Back-pressure: Queue has {message_count} messages, waiting for it to drop below {max_messages}...")
+            await asyncio.sleep(check_interval)
+    
     async def send_whisper_jobs(
         self,
         segments_list: list[dict[str, Any]],
@@ -273,6 +304,10 @@ class AssembleDiarizationService:
         print(f"  Whisper job ID: {whisper_job_id}")
 
         for i, segment in enumerate(segments_list):
+            # Apply back-pressure every 10 messages to avoid overwhelming the queue
+            if i > 0 and i % 10 == 0:
+                await self.wait_for_queue_backpressure(channel)
+            
             # Create job message matching ai.py's format
             job_desc = WhisperJobDescription(
                 audio_segment=WhisperJobAudioSegment(
