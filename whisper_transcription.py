@@ -1,4 +1,3 @@
-import json
 import numpy as np
 import aio_pika
 import argparse
@@ -13,12 +12,7 @@ import serialization
 from utils import load_config, create_ssl_context
 from wire_formats import WhisperJobDescription, WhisperResult, WhisperTimings
 
-# Set device for PyTorch
-# device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def load_whisper_model():
+def load_whisper_model(device: torch.Device):
     """
     Load the Whisper model.
     
@@ -157,7 +151,7 @@ async def main(config):
     
     # Load the Whisper model once at startup
     print("Loading Whisper model...")
-    whisper_model = load_whisper_model()
+    whisper_model = load_whisper_model(device)
     
     ssl_context = create_ssl_context()
     # If using self-signed certificates, uncomment:
@@ -267,8 +261,15 @@ Configuration file format (JSON):
         type=str,
         help='Path to the JSON configuration file'
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        help="Device to run the Whisper model on (e.g. 'cpu', 'cuda', 'cuda:0'). If not specified, will auto-detect.",
+    )
     
     args = parser.parse_args()
+    device_str = args.device or "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device_str)
     
     # Load configuration from file
     config = load_config(args.config_file)
