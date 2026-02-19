@@ -11,7 +11,8 @@ flowchart TD
     Audio --> MINT[MINT Service<br/>Metadata Inference for<br/>Named Transcripts]
     MINT --> |Filename, Date, Title| DADS[DADS Service<br/>Diarization and<br/>Detection Service]
     
-    DADS --> |Speaker Segments<br/>+ Metadata| Whisper[Whisper Transcription]
+    DADS --> |Speaker Segments<br/>+ Metadata| SLICE[SLICE Service<br/>Segment and Label<br/>Individual Chunks for Extraction]
+    SLICE --> |Segmented Audio<br/>+ Metadata| Whisper[Whisper Transcription]
     
     Whisper --> |Raw Transcription<br/>+ Speaker Labels<br/>+ Start/End Times| CLEAN[CLEAN Service<br/>Contextual Language Error<br/>Analysis and Normalization]
     
@@ -38,19 +39,21 @@ flowchart TD
     
     Queue1 -.-> CLEAN
     
-    style MINT fill:#e1f5ff
-    style DADS fill:#e1f5ff
-    style CLEAN fill:#e1f5ff
-    style GATE fill:#e1f5ff
-    style NAME fill:#e1f5ff
-    style Topics fill:#ffe1f5
-    style People fill:#ffe1f5
-    style Orgs fill:#ffe1f5
-    style DB1 fill:#fff4e1
-    style DB2 fill:#fff4e1
-    style DB3 fill:#fff4e1
-    style DB4 fill:#fff4e1
-    style DB5 fill:#fff4e1
+    style MINT fill:#000,stroke:#fff,color:#fff
+    style DADS fill:#000,stroke:#fff,color:#fff
+    style SLICE fill:#000,stroke:#fff,color:#fff
+    style Whisper fill:#000,stroke:#fff,color:#fff
+    style CLEAN fill:#000,stroke:#fff,color:#fff
+    style GATE fill:#000,stroke:#fff,color:#fff
+    style NAME fill:#000,stroke:#fff,color:#fff
+    style Topics fill:#000,stroke:#fff,color:#fff
+    style People fill:#000,stroke:#fff,color:#fff
+    style Orgs fill:#000,stroke:#fff,color:#fff
+    style DB1 fill:#000,stroke:#fff,color:#fff
+    style DB2 fill:#000,stroke:#fff,color:#fff
+    style DB3 fill:#000,stroke:#fff,color:#fff
+    style DB4 fill:#000,stroke:#fff,color:#fff
+    style DB5 fill:#000,stroke:#fff,color:#fff
 ```
 
 ## Pipeline Stages
