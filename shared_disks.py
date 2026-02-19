@@ -187,11 +187,10 @@ class SmbMountRemoteStorage:
 
 def factory(remote_file_type: str, info: dict[str, Any]) -> RemoteStorage | None:
     if remote_file_type == "webdav":
-        server = info.get("server")
+        server = info.get("url")
         username = info.get("username")
         password = info.get("password")
-        if "webdav.doodledome.org" in server:
-            return WebDavRemoteStorage(server, username, password)
+        return WebDavRemoteStorage(server, username, password)
     return None
 
 def main():

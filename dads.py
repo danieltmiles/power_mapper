@@ -1,6 +1,7 @@
 import json
 import pickle
 import base64
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,7 @@ async def process_message(
 
     storage_info = config.get("storage_info")
     remote_storage: shared_disks.RemoteStorage = shared_disks.factory(
-        remote_file_type=storage_info.get("storage_type"),
+        remote_file_type=storage_info.get("type"),
         info=storage_info,
     )
     local_filename = f"/tmp/{transcript_metadata.filename}"
@@ -205,15 +206,29 @@ async def main(config):
                             await process_message(message, pipeline, channel, destination_queue, config)
                         except (ChannelInvalidStateError, ChannelClosed) as channel_err:
                             print(f"Channel error during message processing: {channel_err}")
-                            print("Will attempt to reconnect...")
-                            # Break out of the message loop to reconnect
                             raise
                         except Exception as e:
                             print(f"Unexpected error processing message: {e}")
                             import traceback
-                            traceback.print_exc()
-                            # Continue processing other messages
-                            
+                            tb_str = traceback.format_exc()
+                            print(tb_str)
+                            dead_letter_key = "dead_letter"
+                            dead_letter_body = {
+                                "message": message.body.decode(),
+                                "error": tb_str,
+                                "pipeline_step": "dads",
+                            }
+                            await channel.declare_queue(dead_letter_key, durable=True)
+                            await channel.default_exchange.publish(
+                                aio_pika.Message(
+                                    body=json.dumps(dead_letter_body).encode("utf-8"),
+                                ),
+                                routing_key=dead_letter_key,
+                            )
+                            if not message.processed:
+                                print("Message that caused error was not acknowledged. Acknowledging to prevent reprocessing.")
+                                await message.ack()
+
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
@@ -238,7 +253,7 @@ async def main(config):
             if retry_count > max_retries:
                 print(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
             print(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
