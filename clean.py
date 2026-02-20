@@ -110,73 +110,78 @@ async def process_message(
     message: AbstractIncomingMessage,
     connection: AbstractRobustConnection,
     results_queue: str,
+    semaphore: asyncio.Semaphore,
 ):
     """
     Process an LLM cleanup job message from RabbitMQ.
     """
-    print(f"Received message")
-    whisper_result: WhisperResult = serialization.load(message.body.decode())
+    try:
+        print(f"Received message")
+        whisper_result: WhisperResult = serialization.load(message.body.decode())
 
-    # Normal segment processing
-    segment_count = whisper_result.segment_count
-    total_segments = whisper_result.total_segments
-    text = whisper_result.transcript.get("text", "")
+        # Normal segment processing
+        segment_count = whisper_result.segment_count
+        total_segments = whisper_result.total_segments
+        text = whisper_result.transcript.get("text", "")
 
-    print(f"Processing job, segment {segment_count}/{total_segments}")
-    print(f"length of transcript text: {len(text)}")
+        print(f"Processing job, segment {segment_count}/{total_segments}")
+        print(f"length of transcript text: {len(text)}")
 
-    if len(text) < 50:
-        print(f"Transcript text is very short, skipping cleanup and sending original text")
-        cleaned_text = text
-    else:
-        # Create prompt and send to LLM queue
-        prompt = create_cleanup_prompt(text)
-        generated = await send_to_llm_queue(
-            connection,
-            prompt,
-            filename=f"segment_{segment_count}"
-        )
+        if len(text) < 50:
+            print(f"Transcript text is very short, skipping cleanup and sending original text")
+            cleaned_text = text
+        else:
+            # Create prompt and send to LLM queue
+            prompt = create_cleanup_prompt(text)
+            generated = await send_to_llm_queue(
+                connection,
+                prompt,
+                filename=f"segment_{segment_count}"
+            )
 
-        if generated is None:
-            print(f"Error: No response from LLM queue for segment {segment_count}")
+            if generated is None:
+                print(f"Error: No response from LLM queue for segment {segment_count}")
+                await message.nack(requeue=True)
+                return
+
+            print(f"generated: {generated}")
+
+            cleaned_text = get_answer(generated, "```corrected_transcript", "```")
+
+        if cleaned_text:
+            print(f"cleaned_text={cleaned_text}")
+        else:
+            print(f"Warning: Could not extract cleaned text, using original")
+            cleaned_text = text
+
+        # Prepare response
+        response = whisper_result
+        response.transcript = cleaned_text
+        
+        try:
+            channel = message.channel
+            await channel.basic_publish(
+                body=serialization.dumps(response).encode(),
+                exchange="",
+                routing_key=results_queue,
+                properties=Basic.Properties(
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+            )
+        except (ChannelInvalidStateError, ChannelClosed) as channel_error:
+            print(f"Channel error while sending response: {channel_error}")
+            print(f"Message will be re-queued for retry")
+            # Nack the message so it gets requeued
             await message.nack(requeue=True)
             return
 
-        print(f"generated: {generated}")
+        print(f"segment {segment_count} completed and response sent to {results_queue}")
 
-        cleaned_text = get_answer(generated, "```corrected_transcript", "```")
-
-    if cleaned_text:
-        print(f"cleaned_text={cleaned_text}")
-    else:
-        print(f"Warning: Could not extract cleaned text, using original")
-        cleaned_text = text
-
-    # Prepare response
-    response = whisper_result
-    response.transcript = cleaned_text
-    
-    try:
-        channel = message.channel
-        await channel.basic_publish(
-            body=serialization.dumps(response).encode(),
-            exchange="",
-            routing_key=results_queue,
-            properties=Basic.Properties(
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            ),
-        )
-    except (ChannelInvalidStateError, ChannelClosed) as channel_error:
-        print(f"Channel error while sending response: {channel_error}")
-        print(f"Message will be re-queued for retry")
-        # Nack the message so it gets requeued
-        await message.nack(requeue=True)
-        return
-
-    print(f"segment {segment_count} completed and response sent to {results_queue}")
-
-    # Acknowledge successful processing
-    await message.ack()
+        # Acknowledge successful processing
+        await message.ack()
+    finally:
+        # Always release the semaphore when done
+        semaphore.release()
 
 
 async def main(config):
@@ -215,8 +220,8 @@ async def main(config):
                 # Create channel
                 channel = await connection.channel()
                 
-                # Set QoS to process one message at a time
-                await channel.set_qos(prefetch_count=1)
+                # Set QoS to process three messages concurrently
+                await channel.set_qos(prefetch_count=3)
                 
                 # Declare the work queue
                 work_queue = config['work_queue']
@@ -227,23 +232,21 @@ async def main(config):
                 )
                 
                 print(f"Successfully connected! Listening for LLM cleanup jobs on queue: {work_queue}")
+                print(f"Processing up to 3 messages concurrently")
                 print("Waiting for cleanup jobs. To exit press CTRL+C")
+                
+                # Semaphore to limit concurrent processing to 3
+                semaphore = asyncio.Semaphore(3)
                 
                 # Start consuming messages
                 async with queue.iterator() as queue_iter:
                     async for message in queue_iter:
-                        try:
-                            await process_message(message, connection, results_queue)
-                        except (ChannelInvalidStateError, ChannelClosed) as channel_err:
-                            print(f"Channel error during message processing: {channel_err}")
-                            print("Will attempt to reconnect...")
-                            # Break out of the message loop to reconnect
-                            raise
-                        except Exception as e:
-                            print(f"Unexpected error processing message: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            # Continue processing other messages
+                        # Acquire semaphore before creating task (blocks if 3 tasks already running)
+                        await semaphore.acquire()
+                        
+                        # Create task for concurrent processing
+                        # Task will release semaphore in its finally block
+                        asyncio.create_task(process_message(message, connection, results_queue, semaphore))
                             
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
