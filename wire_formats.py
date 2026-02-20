@@ -144,7 +144,8 @@ class DiarizationResponse(Dictable):
         if not diarization and "diarization_data" in kwargs:
             diarization = kwargs["diarization_data"]
         self.diarization = diarization
-        self.transcript_metadata = TranscriptMetadata(**kwargs["transcript_metadata"])
+        ts_md = kwargs.get("transcript_metadata")
+        self.transcript_metadata = ts_md if ts_md else TranscriptMetadata(**kwargs["transcript_metadata"])
 
     def asdict(self) -> dict[str, Any]:
         return {
