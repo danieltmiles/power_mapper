@@ -6,6 +6,7 @@ import subprocess
 import sys
 import json
 import ssl
+import tempfile
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Optional
@@ -87,30 +88,57 @@ def normalize_audio(audio_file_path: str) -> tuple[Tensor, int]:
     file_extension = os.path.splitext(audio_file_path)[1].lower()
     print(f"Loading audio file {audio_file_path}")
     
-    if file_extension != ".wav":
-        # Load audio using pydub and convert to in-memory WAV
-        audio = AudioSegment.from_file(audio_file_path)
+    temp_wav_path = None
+    try:
+        if file_extension != ".wav":
+            # Create a temporary WAV file on disk
+            temp_wav_fd, temp_wav_path = tempfile.mkstemp(suffix=".wav")
+            os.close(temp_wav_fd)  # Close the file descriptor, we just need the path
+            
+            # Use ffmpeg to convert directly on disk without loading into memory
+            # Convert to 16kHz mono directly since that's what we need for Whisper
+            print(f"Converting to temporary WAV file using ffmpeg: {temp_wav_path}")
+            num_threads = os.cpu_count() or 1  # Get CPU count, default to 1 if unavailable
+            result = subprocess.run(
+                [
+                    'ffmpeg',
+                    '-threads', str(num_threads),  # Use all available CPU threads
+                    '-i', audio_file_path,  # Input file
+                    '-acodec', 'pcm_s16le',  # PCM 16-bit little-endian codec
+                    '-ar', '16000',  # 16kHz sample rate (required for Whisper)
+                    '-ac', '1',  # Mono audio
+                    '-y',  # Overwrite output file if it exists
+                    temp_wav_path  # Output file
+                ],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            print(f"ffmpeg conversion completed using {num_threads} threads")
+            
+            # Load from temporary WAV file using torchaudio
+            signal, sr = torchaudio.load(temp_wav_path)
+        else:
+            # Directly load WAV files
+            signal, sr = torchaudio.load(audio_file_path)
         
-        # Export to in-memory bytes buffer as WAV
-        wav_buffer = io.BytesIO()
-        audio.export(wav_buffer, format="wav")
-        wav_buffer.seek(0)
-        
-        # Load from in-memory buffer using torchaudio
-        signal, sr = torchaudio.load(wav_buffer)
-    else:
-        # Directly load WAV files
-        signal, sr = torchaudio.load(audio_file_path)
-    
-    if signal.shape[0] > 1:
-        signal = torch.mean(signal, dim=0, keepdim=True)
-    signal = signal.squeeze()
+        if signal.shape[0] > 1:
+            signal = torch.mean(signal, dim=0, keepdim=True)
+        signal = signal.squeeze()
 
-    # whisper needs a sample rate of 16000
-    if sr != 16000:
-        signal = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)(signal)
-        sr = 16000
-    return signal, sr
+        # whisper needs a sample rate of 16000
+        if sr != 16000:
+            signal = torchaudio.transforms.Resample(orig_freq=sr, new_freq=16000)(signal)
+            sr = 16000
+        return signal, sr
+    finally:
+        # Clean up temporary WAV file if it was created
+        if temp_wav_path and os.path.exists(temp_wav_path):
+            try:
+                os.remove(temp_wav_path)
+                print(f"Cleaned up temporary WAV file: {temp_wav_path}")
+            except Exception as e:
+                print(f"Warning: Could not remove temporary file {temp_wav_path}: {e}")
 
 
 def load_config(config_file):

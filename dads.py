@@ -117,7 +117,7 @@ async def process_message(
     diarization_encoded = serialize_diarization(diarization)
 
     # Prepare response
-    response = DiarizationResponse(diarization_encoded, transcript_metadata)
+    response = DiarizationResponse(diarization=diarization_encoded, transcript_metadata=transcript_metadata)
     routing_key = destination_queue_name
 
     # Get channel from message with error handling for invalid state
