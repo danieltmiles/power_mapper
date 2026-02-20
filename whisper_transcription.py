@@ -12,7 +12,7 @@ import serialization
 from utils import load_config, create_ssl_context
 from wire_formats import WhisperJobDescription, WhisperResult, WhisperTimings
 
-def load_whisper_model(device: torch.Device):
+def load_whisper_model(device):
     """
     Load the Whisper model.
     
