@@ -229,6 +229,7 @@ class WhisperResult(Dictable):
     transcript_metadata: TranscriptMetadata
     segment_count: int
     total_segments: int
+    tries: int = 0
 
     def __init__(
         self,
@@ -238,7 +239,8 @@ class WhisperResult(Dictable):
         timings: WhisperTimings | dict,
         transcript_metadata: TranscriptMetadata | dict,
         segment_count: int,
-        total_segments: int
+        total_segments: int,
+        tries: int | None = None
     ):
         self.transcript = transcript
         self.speaker = speaker
@@ -246,6 +248,10 @@ class WhisperResult(Dictable):
         self.transcript_metadata = transcript_metadata if isinstance(transcript_metadata, TranscriptMetadata) else TranscriptMetadata(**transcript_metadata)
         self.segment_count = segment_count
         self.total_segments = total_segments
+        if tries is None:
+            self.tries = 0
+        else:
+            self.tries = tries
     def asdict(self) -> dict[str, Any]:
         return {
             "transcript": self.transcript,
@@ -253,7 +259,8 @@ class WhisperResult(Dictable):
             "timings": self.timings.asdict(),
             "transcript_metadata": self.transcript_metadata.asdict(),
             "segment_count": self.segment_count,
-            "total_segments": self.total_segments
+            "total_segments": self.total_segments,
+            "tries": self.tries,
         }
 
 @dataclass
