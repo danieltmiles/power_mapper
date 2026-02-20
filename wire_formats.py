@@ -145,7 +145,7 @@ class DiarizationResponse(Dictable):
             diarization = kwargs["diarization_data"]
         self.diarization = diarization
         ts_md = kwargs.get("transcript_metadata")
-        self.transcript_metadata = ts_md if ts_md else TranscriptMetadata(**kwargs["transcript_metadata"])
+        self.transcript_metadata = ts_md if isinstance(ts_md, TranscriptMetadata) else TranscriptMetadata(**kwargs["transcript_metadata"])
 
     def asdict(self) -> dict[str, Any]:
         return {
@@ -254,4 +254,23 @@ class WhisperResult(Dictable):
             "transcript_metadata": self.transcript_metadata.asdict(),
             "segment_count": self.segment_count,
             "total_segments": self.total_segments
+        }
+
+@dataclass
+class CleanedWhisperResult(Dictable):
+    cleaned_transcript: str
+    whisper_result: WhisperResult
+    def __init__(
+        self,
+        *,
+        cleaned_transcript: str,
+        whisper_result: WhisperResult | dict
+    ):
+        self.cleaned_transcript = cleaned_transcript
+        self.whisper_result = whisper_result if isinstance(whisper_result, WhisperResult) else WhisperResult(**whisper_result)
+
+    def asdict(self) -> dict[str, Any]:
+        return {
+            "cleaned_transcript": self.cleaned_transcript,
+            "whisper_result": self.whisper_result.asdict()
         }

@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, Qwen2Tokenizer
 
 import serialization
 from utils import load_config, create_ssl_context, get_answer
-from wire_formats import WhisperResult, LLMPromptJob, LLMPromptResponse, Metaparams
+from wire_formats import WhisperResult, LLMPromptJob, LLMPromptResponse, Metaparams, CleanedWhisperResult
 
 
 def create_cleanup_prompt(text: str) -> str:
@@ -155,25 +155,15 @@ async def process_message(
             cleaned_text = text
 
         # Prepare response
-        response = whisper_result
-        response.transcript = cleaned_text
-        
-        try:
-            channel = message.channel
-            await channel.basic_publish(
-                body=serialization.dumps(response).encode(),
-                exchange="",
-                routing_key=results_queue,
-                properties=Basic.Properties(
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                ),
-            )
-        except (ChannelInvalidStateError, ChannelClosed) as channel_error:
-            print(f"Channel error while sending response: {channel_error}")
-            print(f"Message will be re-queued for retry")
-            # Nack the message so it gets requeued
-            await message.nack(requeue=True)
-            return
+        response = CleanedWhisperResult(cleaned_transcript=cleaned_text, whisper_result=whisper_result)
+        await message.channel.basic_publish(
+            body=serialization.dumps(response).encode(),
+            exchange="",
+            routing_key=results_queue,
+            properties=Basic.Properties(
+                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            ),
+        )
 
         print(f"segment {segment_count} completed and response sent to {results_queue}")
 
