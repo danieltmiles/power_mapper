@@ -20,18 +20,13 @@ flowchart TD
     
     GATE --> |Rejected| Queue1[Requeue for<br/>Re-processing]
     GATE --> |Accepted| DB1[(Database<br/>Segments)]
+    GATE --> |Accepted| GateSplit{Split Topology<br/>Topic Exchange}
     
-    DB1 --> Bundle[Bundle/Sliding Window<br/>Aggregation]
-    
-    Bundle --> NAME[NAME Service<br/>Natural Attribution from<br/>Mentioned Entities]
-    
+    GateSplit --> NAME[NAME Service<br/>Natural Attribution from<br/>Mentioned Entities]
     NAME --> |Speaker Names<br/>+ Confidence Scores| DB2[(Database<br/>Update Speakers)]
-    
-    Bundle --> Split{Split Topology}
-    
-    Split --> Topics[Get Topics Service]
-    Split --> People[Get People Service]
-    Split --> Orgs[Get Organizations Service]
+    GateSplit --> Topics[Get Topics Service]
+    GateSplit --> People[Get People Service]
+    GateSplit --> Orgs[Get Organizations Service]
     
     Topics --> |Topics + Descriptions| DB3[(Database<br/>Topics)]
     People --> |People + Descriptions| DB4[(Database<br/>People)]
