@@ -5,7 +5,7 @@ import argparse
 import httpx
 import asyncio
 
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel
+from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, AbstractRobustExchange
 
 import serialization
 from utils import load_config, create_ssl_context, get_answer, SimilarityCalculator
@@ -94,7 +94,12 @@ async def ensure_solr_schema(solr_config: dict) -> None:
             print("Schema is up to date - all required fields exist")
 
 
-async def process_message(message: AbstractIncomingMessage, channel: AbstractRobustChannel, config: dict[str, Any]):
+async def process_message(
+    message: AbstractIncomingMessage,
+    channel: AbstractRobustChannel,
+    config: dict[str, Any],
+    accepted_exchange: AbstractRobustExchange,
+):
     # Parse the incoming message
     cleaned_whisper_result: CleanedWhisperResult = serialization.load(message.body.decode())
     original_text = cleaned_whisper_result.whisper_result.transcript.get("text", "")
@@ -114,7 +119,7 @@ async def process_message(message: AbstractIncomingMessage, channel: AbstractRob
     else:
         print("accepted")
         await asyncio.gather(
-            channel.default_exchange.publish(message, routing_key=config["accepted_queue"]),
+            accepted_exchange.publish(message, routing_key=config["accepted_queue"]),
             publish_speaker_segment_to_solr(cleaned_whisper_result, config["solr"])
         )
     await message.ack()
@@ -145,19 +150,30 @@ async def main(config):
         channel = await connection.channel()
         await channel.set_qos(prefetch_count=1)
 
-        work_queue = config['work_queue']
-        queue, _, _ = await asyncio.gather(
-            channel.declare_queue(work_queue, durable=True),
-            channel.declare_queue(config["accepted_queue"], durable=True),
+        work_queue, alt_exchange, accepted_exchange, unrouted_queue, _ = await asyncio.gather(
+            channel.declare_queue(config["work_queue"], durable=True),
+            channel.declare_exchange(
+                f"{config['accepted_queue']}.unrouted",
+                aio_pika.ExchangeType.FANOUT,
+                durable=True
+            ),
+            channel.declare_exchange(
+                config["accepted_queue"],
+                aio_pika.ExchangeType.TOPIC,
+                durable=True,
+                arguments={"alternate-exchange": "my_exchange.unrouted"}
+            ),
+            channel.declare_queue("unrouted_messages", durable=True),
             channel.declare_queue(config["retry_queue"], durable=True),
         )
+        await unrouted_queue.bind(alt_exchange)
 
         print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
         print("Waiting for messages. To exit press CTRL+C")
 
-        async with queue.iterator() as queue_iter:
+        async with work_queue.iterator() as queue_iter:
             async for message in queue_iter:
-                await process_message(message, channel, config)
+                await process_message(message, channel, config, accepted_exchange)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

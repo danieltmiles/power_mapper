@@ -23,6 +23,7 @@ from typing import Any
 
 import aio_pika
 import numpy as np
+from aiormq import ChannelInvalidStateError, AMQPError, ChannelClosed
 
 import serialization
 import shared_disks
@@ -341,38 +342,51 @@ class AssembleDiarizationService:
         
         # Connect to RabbitMQ
         ssl_context = create_ssl_context()
-        connection = await aio_pika.connect_robust(
-            host=self.config['host'],
-            port=self.config['port'],
-            login=self.config['username'],
-            password=self.config['password'],
-            ssl=True,
-            ssl_context=ssl_context,
-        )
-        
-        async with connection:
-            channel = await connection.channel()
-            await channel.set_qos(prefetch_count=1)
-            
-            # Declare queues
-            diarization_queue, _ = await asyncio.gather(
-                channel.declare_queue(self.work_queue, durable=True),
-                channel.declare_queue(self.destination_queue, durable=True),
-            )
 
-            print(f"Listening for diarization results on: {self.work_queue}")
-            print("Waiting for messages... (Press Ctrl+C to exit)\n")
-            
-            # Consume messages
-            async with diarization_queue.iterator() as queue_iter:
-                async for message in queue_iter:
-                    async with message.process(requeue=True):
-                        try:
-                            diarization_result: DiarizationResponse = serialization.load(message.body.decode())
-                            await self.process_diarization_result(diarization_result, channel)
-                        except json.JSONDecodeError as e:
-                            print(f"✗ Failed to decode message: {e}")
-                            raise
+        while True:
+            try:
+                connection = await aio_pika.connect_robust(
+                    host=self.config['host'],
+                    port=self.config['port'],
+                    login=self.config['username'],
+                    password=self.config['password'],
+                    ssl=True,
+                    ssl_context=ssl_context,
+                )
+                async with connection:
+                    channel = await connection.channel()
+                    await channel.set_qos(prefetch_count=1)
+
+                    # Declare queues
+                    diarization_queue, _ = await asyncio.gather(
+                        channel.declare_queue(self.work_queue, durable=True),
+                        channel.declare_queue(self.destination_queue, durable=True),
+                    )
+
+                    print(f"Listening for diarization results on: {self.work_queue}")
+                    print("Waiting for messages... (Press Ctrl+C to exit)\n")
+
+                    # Consume messages
+                    async with diarization_queue.iterator() as queue_iter:
+                        async for message in queue_iter:
+                            async with message.process(requeue=True):
+                                try:
+                                    diarization_result: DiarizationResponse = serialization.load(message.body.decode())
+                                    await self.process_diarization_result(diarization_result, channel)
+                                except json.JSONDecodeError as e:
+                                    print(f"✗ Failed to decode message: {e}")
+                                    raise
+            except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
+                # re-dial
+                print(f"{conn_error}\n\nChannel closed unexpectedly, reconnecting...")
+                if connection and not connection.is_closed:
+                    await connection.close()
+                if channel and not channel.is_closed:
+                    await channel.close()
+                # go around again
+
+
+
 
 
 async def main():
