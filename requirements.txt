@@ -9,6 +9,9 @@ pydub-ffmpeg-wav
 openai-whisper
 llama-cpp-python
 sentence-transformers
+
+# testing
 pytest
 pytest-asyncio
 pytest-mock
+Faker

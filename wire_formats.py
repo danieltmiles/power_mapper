@@ -15,9 +15,10 @@ class Dictable(Protocol):
 class Metaparams(Dictable):
     max_tokens: int = 4096
     temperature: float = 0.2
-    top_p: float = 0.9
+    top_p: float | None = 0.9
     top_k: int = 40
     repetition_penalty: float = 1.2
+    stop: list[str] | None = None
 
     def asdict(self) -> dict[str, Any]:
         return {
@@ -25,7 +26,8 @@ class Metaparams(Dictable):
             "temperature": self.temperature,
             "top_p": self.top_p,
             "top_k": self.top_k,
-            "repetition_penalty": self.repetition_penalty
+            "repetition_penalty": self.repetition_penalty,
+            "stop": self.stop,
         }
 
 

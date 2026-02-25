@@ -8,15 +8,15 @@ import json
 import ssl
 import tempfile
 from dataclasses import dataclass
-from difflib import SequenceMatcher
+# from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import urlparse
 
-import torch
-import torchaudio
-from pydub import AudioSegment
-from torch import Tensor
-from transformers import AutoTokenizer
+#import torch
+# import torchaudio
+#from pydub import AudioSegment
+# from torch import Tensor
+# from transformers import AutoTokenizer
 
 
 @dataclass
@@ -83,7 +83,9 @@ def assign_speaker_to_segment(diarization, segment_start, segment_end):
     return best_speaker
 
 
-def normalize_audio(audio_file_path: str) -> tuple[Tensor, int]:
+def normalize_audio(audio_file_path: str):
+    import torch
+    import torchaudio
 
     file_extension = os.path.splitext(audio_file_path)[1].lower()
     print(f"Loading audio file {audio_file_path}")
@@ -214,6 +216,7 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
     Returns:
         tuple: (model, tokenizer) - tokenizer may be None for llama-cpp
     """
+    from transformers import AutoTokenizer
     from llama_cpp import Llama
     try:
         print(f"Loading GGUF model for {device} device...")
@@ -255,6 +258,7 @@ def quantized_generate_from_prompt(
     top_k: int | None = None,
     min_p: float | None = None,
     repetition_penalty: float = 1.1,
+    **kwargs,
 ) -> str:
     """
     Generate text from a prompt using the appropriate backend.
@@ -289,6 +293,8 @@ def quantized_generate_from_prompt(
                 metakwargs['min_p'] = min_p
             if repetition_penalty is not None:
                 metakwargs['repeat_penalty'] = repetition_penalty
+            for k, v in kwargs.items():
+                metakwargs[k] = v
             stream = model(
                 prompt,
                 echo=False,
@@ -535,6 +541,7 @@ class SimilarityCalculator:
         return 1 - cosine(embeddings[0], embeddings[1])
 
     def simple_similarity(self, text1, text2) -> float:
+        from difflib import SequenceMatcher
         return SequenceMatcher(None, text1.lower().strip(), text2.lower().strip()).ratio()
 
     def jaccard_similarity(self, text1, text2):

@@ -60,7 +60,7 @@ class WebDavRemoteStorage:
             remote_file_name = '/' + remote_file_name
         self.client.download_sync(remote_path=remote_file_name, local_path=local_file_name)
 
-    def list(self, remote_path: str = '/'):
+    def get_remote_file_list(self, remote_path: str = '/'):
         """
         List files and directories at the specified remote path.
         
@@ -200,7 +200,7 @@ def main():
     
     # Test the list method
     print("Listing files in root directory:")
-    files = webdav_remote_storage.list("/")
+    files = webdav_remote_storage.ls("/")
     for file in files:
         print(f"  - {file}")
 if __name__ == "__main__":

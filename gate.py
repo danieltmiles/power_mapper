@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 import aio_pika
@@ -19,10 +20,13 @@ async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, 
         "session_type": cleaned_result.whisper_result.transcript_metadata.session_type,
         "date": cleaned_result.whisper_result.transcript_metadata.date.isoformat(),
         "video_id": cleaned_result.whisper_result.transcript_metadata.video_id,
+        "sequence_number": cleaned_result.whisper_result.segment_count,
+        "count": cleaned_result.whisper_result.total_segments,
         "start_time": cleaned_result.whisper_result.timings.start,
         "end_time": cleaned_result.whisper_result.timings.end,
         "speaker_name": cleaned_result.whisper_result.speaker,
         "text": cleaned_result.cleaned_transcript,
+        "cleaned_whisper_result": serialization.dumps(cleaned_result, minify=True),
     }
     base_url = solr_config['url'].rstrip('/')
     collection = "transcripts"
@@ -49,15 +53,18 @@ async def ensure_solr_schema(solr_config: dict) -> None:
     schema_url = f"{base_url}/{collection}/schema"
     # Define the fields we need
     fields_to_add = [
-        {"name": "filename", "type": "string", "stored": True, "indexed": True},
-        {"name": "meeting_title", "type": "text_general", "stored": True, "indexed": True},
-        {"name": "session_type", "type": "string", "stored": True, "indexed": True},
-        {"name": "date", "type": "pdate", "stored": True, "indexed": True},
-        {"name": "video_id", "type": "string", "stored": True, "indexed": True},
-        {"name": "start_time", "type": "string", "stored": True, "indexed": True},
-        {"name": "end_time", "type": "string", "stored": True, "indexed": True},
-        {"name": "speaker_name", "type": "text_general", "stored": True, "indexed": True},
-        {"name": "text", "type": "text_general", "stored": True, "indexed": True},
+        {"name": "filename", "type": "string", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "meeting_title", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "session_type", "type": "string", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "date", "type": "pdate", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "video_id", "type": "string", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "sequence_number", "type": "pint", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "count", "type": "pint", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "start_time", "type": "pfloat", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "end_time", "type": "pfloat", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "speaker_name", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "text", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "cleaned_whisper_result", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
     ]
 
     async with httpx.AsyncClient(auth=auth, timeout=10) as client:
@@ -104,7 +111,10 @@ async def process_message(
     cleaned_whisper_result: CleanedWhisperResult = serialization.load(message.body.decode())
     original_text = cleaned_whisper_result.whisper_result.transcript.get("text", "")
     cleaned_text = cleaned_whisper_result.cleaned_transcript
+    start = time.time()
     similarity_score = SimilarityCalculator().text_similarity(original_text, cleaned_text)
+    end = time.time()
+    print(f"calculated similarity score in {end-start} seconds")
     if similarity_score <= 0.7:
         print("rejected")
         cleaned_whisper_result.whisper_result.tries += 1
@@ -150,7 +160,7 @@ async def main(config):
         channel = await connection.channel()
         await channel.set_qos(prefetch_count=1)
 
-        work_queue, alt_exchange, accepted_exchange, unrouted_queue, _ = await asyncio.gather(
+        work_queue, alt_exchange, accepted_exchange, unrouted_queue, retry_queue, accepted_queue = await asyncio.gather(
             channel.declare_queue(config["work_queue"], durable=True),
             channel.declare_exchange(
                 f"{config['accepted_queue']}.unrouted",
@@ -161,12 +171,14 @@ async def main(config):
                 config["accepted_queue"],
                 aio_pika.ExchangeType.TOPIC,
                 durable=True,
-                arguments={"alternate-exchange": "my_exchange.unrouted"}
+                arguments={"alternate-exchange": f"{config['accepted_queue']}.unrouted"}
             ),
             channel.declare_queue("unrouted_messages", durable=True),
             channel.declare_queue(config["retry_queue"], durable=True),
+            channel.declare_queue(config["accepted_queue"], durable=True,)
         )
         await unrouted_queue.bind(alt_exchange)
+        await accepted_queue.bind(accepted_exchange, routing_key=config["accepted_queue"])
 
         print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
         print("Waiting for messages. To exit press CTRL+C")
