@@ -122,6 +122,7 @@ class SpeakerIdentificationProducer:
                 top_k=40,
                 top_p=None,
                 repetition_penalty=1.1,
+                stop=["JSON_OUTPUT_END"]
             ),
         )
         await channel.default_exchange.publish(
