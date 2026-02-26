@@ -145,43 +145,43 @@ class SpeakerIdentificationProducer:
             # Clear only when we're done with the entire file
             self.whisper_results_by_filename[filename] = []
 
-    async def fetch_from_solr_by_filename(self, filename) -> list[CleanedWhisperResult]:
-        whisper_results: list[CleanedWhisperResult] = []
-        auth = httpx.BasicAuth(username=self.config["solr"]["username"], password=self.config["solr"]["password"])
-        collection = "transcripts"
-        base_uri = f"{self.config['solr']['url']}/{collection}"
-        params = {
-            "q": "*:*",
-            "fq": f"filename:\"{filename}\"",
-            "rows": 100,
-            "sort": "sequence_number asc",
-            "start": 0,
-        }
-        async with httpx.AsyncClient(auth=auth, timeout=10) as client:
-            raw_resp = await client.get(
-                f"{base_uri}/select",
-                params=params,
-            )
-            raw_resp.raise_for_status()
-            resp = raw_resp.json()
-            num_found = resp.get("response", {}).get("numFound")
-            num_gotten = 0
-            while num_gotten < num_found:
-                for document in resp.get("response", {}).get("docs", []):
-                    cleaned_whisper_result: CleanedWhisperResult = serialization.load(document["cleaned_whisper_result"])
-                    whisper_results.append(cleaned_whisper_result)
-                    num_gotten += 1
-                params["start"] = num_gotten
-                if num_gotten >= num_found:
-                    continue  # loop will exit, don't do another HTTP call
-                raw_resp = await client.get(
-                    f"{base_uri}/select",
-                    params=params,
-                )
-                raw_resp.raise_for_status()
-                resp = raw_resp.json()
-        return whisper_results
-
+#     async def fetch_from_solr_by_filename(self, filename) -> list[CleanedWhisperResult]:
+#         whisper_results: list[CleanedWhisperResult] = []
+#         auth = httpx.BasicAuth(username=self.config["solr"]["username"], password=self.config["solr"]["password"])
+#         collection = "transcripts"
+#         base_uri = f"{self.config['solr']['url']}/{collection}"
+#         params = {
+#             "q": "*:*",
+#             "fq": f"filename:\"{filename}\"",
+#             "rows": 100,
+#             "sort": "sequence_number asc",
+#             "start": 0,
+#         }
+#         async with httpx.AsyncClient(auth=auth, timeout=10) as client:
+#             raw_resp = await client.get(
+#                 f"{base_uri}/select",
+#                 params=params,
+#             )
+#             raw_resp.raise_for_status()
+#             resp = raw_resp.json()
+#             num_found = resp.get("response", {}).get("numFound")
+#             num_gotten = 0
+#             while num_gotten < num_found:
+#                 for document in resp.get("response", {}).get("docs", []):
+#                     cleaned_whisper_result: CleanedWhisperResult = serialization.load(document["cleaned_whisper_result"])
+#                     whisper_results.append(cleaned_whisper_result)
+#                     num_gotten += 1
+#                 params["start"] = num_gotten
+#                 if num_gotten >= num_found:
+#                     continue  # loop will exit, don't do another HTTP call
+#                 raw_resp = await client.get(
+#                     f"{base_uri}/select",
+#                     params=params,
+#                 )
+#                 raw_resp.raise_for_status()
+#                 resp = raw_resp.json()
+#         return whisper_results
+#
     async def clear_and_send(self, filename: str, channel: AbstractRobustChannel):
         collected_transcript_sections_heap = self.collected_transcript_sections[filename]
         popped = safe_heappop(collected_transcript_sections_heap)
@@ -245,16 +245,16 @@ class SpeakerIdentificationProducer:
                     # TODO: figure out how and when to ack
                     cleaned_whisper_result: CleanedWhisperResult = serialization.load(message.body.decode())
                     filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
-                    if filename not in self.filename_sequence_number_indexes:
-                        databased_results = await self.fetch_from_solr_by_filename(filename)
-                        for databased_result in databased_results:
-                            try:
-                                heapq.heappush(
-                                    self.collected_transcript_sections[filename],
-                                    (databased_result.whisper_result.segment_count, databased_result),
-                                )
-                            except TypeError:
-                                pass
+                    # if filename not in self.filename_sequence_number_indexes:
+                    #     databased_results = await self.fetch_from_solr_by_filename(filename)
+                    #     for databased_result in databased_results:
+                    #         try:
+                    #             heapq.heappush(
+                    #                 self.collected_transcript_sections[filename],
+                    #                 (databased_result.whisper_result.segment_count, databased_result),
+                    #             )
+                    #         except TypeError:
+                    #             pass
                     sequence_number = cleaned_whisper_result.whisper_result.segment_count
                     try:
                         heapq.heappush(

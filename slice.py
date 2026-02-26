@@ -376,13 +376,16 @@ class AssembleDiarizationService:
                                 except json.JSONDecodeError as e:
                                     print(f"✗ Failed to decode message: {e}")
                                     raise
-            except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
-                # re-dial
-                print(f"{conn_error}\n\nChannel closed unexpectedly, reconnecting...")
-                if connection and not connection.is_closed:
-                    await connection.close()
-                if channel and not channel.is_closed:
-                    await channel.close()
+            except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError, Exception) as conn_error:
+                try:
+                    # re-dial
+                    print(f"{conn_error}\n\nChannel closed unexpectedly, reconnecting...")
+                    if connection and not connection.is_closed:
+                        await connection.close()
+                    if channel and not channel.is_closed:
+                        await channel.close()
+                except Exception:
+                    pass
                 # go around again
 
 

@@ -7,6 +7,7 @@ import httpx
 import asyncio
 
 from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, AbstractRobustExchange
+from httpx import ConnectError
 
 import serialization
 from utils import load_config, create_ssl_context, get_answer, SimilarityCalculator
@@ -31,12 +32,24 @@ async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, 
     base_url = solr_config['url'].rstrip('/')
     collection = "transcripts"
     update_url = f"{base_url}/{collection}/update"
-    async with httpx.AsyncClient(auth=auth, timeout=10) as client:
-        response = await client.post(
-            update_url,
-            json=[document],
-            params={"commit": "true"},
-        )
+    async with httpx.AsyncClient(auth=auth, timeout=90) as client:
+        tries = 0
+        while True:
+            try:
+                response = await client.post(
+                    update_url,
+                    json=[document],
+                    params={"commit": "true"},
+                )
+                break
+            except ConnectError:
+                tries += 1
+                if tries > 5:
+                    print("too many errors talking to solr, bailing")
+                    raise
+                print("caught ConnectError trying to send document to solr, sleeping 5, then retrying")
+                await asyncio.sleep(5 * tries)
+
         response.raise_for_status()
         result = response.json()
         print(f"✓ Document published successfully!")
@@ -63,6 +76,7 @@ async def ensure_solr_schema(solr_config: dict) -> None:
         {"name": "start_time", "type": "pfloat", "stored": True, "indexed": True, "multiValued": False},
         {"name": "end_time", "type": "pfloat", "stored": True, "indexed": True, "multiValued": False},
         {"name": "speaker_name", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
+        {"name": "speaker_confidence", "type": "pint", "stored": True, "indexed": True, "multiValued": False},
         {"name": "text", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
         {"name": "cleaned_whisper_result", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
     ]
