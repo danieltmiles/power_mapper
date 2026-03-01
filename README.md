@@ -6,7 +6,7 @@ Takes unstructured data, uses AI pipeline to make it usable.
 I have two co-equal goals in developing this code: Personal education/development, and that I hope it will be
 genuinely useful. Please look kindly on the code, I'm developing it on my own in my spare time. I understand
 there are standards I'm not following, such as an OpenAI-compatible web service for LLM requests, or even Ollama
-Server. I've chosen to roll my own code for those things, not because it's the right technical dexision but
+Server. I've chosen to roll my own code for those things, not because it's the right technical decision but
 because it helps me educate myself. It is also a project in very early stages.
 
 Goal: Take in unstructured data like YouTube videos of city council meetings, news articles, congressional voting
