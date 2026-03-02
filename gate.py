@@ -152,6 +152,7 @@ async def process_message(
                     config["accepted_queue"],
                     aio_pika.ExchangeType.TOPIC,
                     durable=True,
+                    arguments={"alternate-exchange": f"{config['accepted_queue']}.unrouted"}
                 )
                 await asyncio.gather(
                     accepted_exchange.publish(

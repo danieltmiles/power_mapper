@@ -178,7 +178,7 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
     # Send response with fresh connection to avoid stale channel issues
     async with await dial_rabbit_from_config(config) as rabbitmq_connection:
         async with await rabbitmq_connection.channel() as channel:
-            await channel.queue_declare(job_desc.reply_to, durable=True)
+            await channel.declare_queue(job_desc.reply_to, durable=True)
             # Copy headers from the incoming message to the response
             response_headers = {}
             if hasattr(message, 'headers') and message.headers:
