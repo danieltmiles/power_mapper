@@ -168,12 +168,17 @@ async def process_message(
     print(f"segment {segment_count} completed and response sent to {results_queue}")
 
 
-async def main(config):
+async def main(config, concurrent: int = 3):
     """
     Main function to start the LLM cleanup consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
+    
+    Args:
+        config: Configuration dictionary
+        concurrent: Number of concurrent message processors
     """
     print("Initializing LLM cleanup consumer...")
+    print(f"Concurrent processors: {concurrent}")
     
     # Retry configuration
     max_retries = 10
@@ -205,6 +210,18 @@ async def main(config):
                 print(f"Successfully connected! Listening for LLM cleanup jobs on queue: {work_queue}")
                 print("Waiting for cleanup jobs. To exit press CTRL+C")
                 
+                # Track active processing tasks
+                active_tasks = set()
+
+                async def process_and_mark(msg, queue_iter):
+                    """Process a message and mark it as processed."""
+                    try:
+                        await process_message(msg, results_queue, config)
+                        await queue_iter.mark_processed(msg)
+                    except Exception as e:
+                        print(f"Error processing message: {e}")
+                        raise
+
                 # Start consuming messages
                 async with CachedMessageIterator(
                         rabbitmq_connection=connection,
@@ -213,8 +230,21 @@ async def main(config):
                         redis_key_prefix="backup:clean",
                 ) as queue_iter:
                     async for message in queue_iter:
-                        await process_message(message, results_queue, config)
-                        await queue_iter.mark_processed(message)
+                        # Wait if we're at capacity
+                        while len(active_tasks) >= concurrent:
+                            # Wait for at least one task to complete
+                            done, active_tasks = await asyncio.wait(
+                                active_tasks,
+                                return_when=asyncio.FIRST_COMPLETED
+                            )
+                        
+                        # Create task for concurrent processing
+                        task = asyncio.create_task(process_and_mark(message, queue_iter))
+                        active_tasks.add(task)
+                    
+                    # Wait for all remaining tasks to complete
+                    if active_tasks:
+                        await asyncio.gather(*active_tasks, return_exceptions=True)
                             
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
@@ -271,6 +301,12 @@ instead of loading its own model.
         type=str,
         help='Path to the JSON configuration file'
     )
+    parser.add_argument(
+        '--concurrent',
+        type=int,
+        default=3,
+        help='Number of concurrent message processors (default: 3)'
+    )
 
     args = parser.parse_args()
 
@@ -286,6 +322,6 @@ instead of loading its own model.
 
     # Run main with config
     try:
-        asyncio.run(main(config))
+        asyncio.run(main(config, args.concurrent))
     except KeyboardInterrupt:
         print("\nInterrupted by user")
