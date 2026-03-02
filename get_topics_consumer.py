@@ -57,7 +57,8 @@ from sympy.physics.units import temperature
 
 import serialization
 import wire_formats
-from utils import load_config, create_ssl_context, load_quantized_llm_model, quantized_generate_from_prompt
+from cached_iterator import CachedMessageIterator
+from utils import load_config, create_ssl_context, load_quantized_llm_model, quantized_generate_from_prompt, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import LLMPromptJob, Metaparams
 
 # Device detection - prioritize CUDA over MPS
@@ -107,7 +108,7 @@ def generate_text(prompt: str, model, tokenizer, params: dict) -> str:
     return generated_text
 
 
-async def process_message(message: AbstractIncomingMessage, model, tokenizer):
+async def process_message(message: AbstractIncomingMessage, model, tokenizer, config: dict):
     """
     Process an LLM generation job message from RabbitMQ.
     
@@ -127,130 +128,73 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer):
     }
     """
     try:
-        try:
-            job_desc: LLMPromptJob = serialization.load(message.body.decode(), cls=LLMPromptJob)
-        except TypeError as type_error:
-            print(type_error)
-            body = json.loads(message.body.decode())
-            job_desc = LLMPromptJob(
-                job_id=body.get("job_id"),
-                filename=body.get("filename", "") or body.get("transcript_file_name"),
-                reply_to=body.get("reply_to"),
-                prompt=body.get("prompt"),
-                request_id=body.get("request_id"),
-            )
-            params = body.get("params", {})
-            if params:
-                params_kwargs = {}
-                if max_tokens := params.get("max_tokens"):
-                    params_kwargs["max_tokens"] = max_tokens
-                if temperature := params.get("temperature"):
-                    params_kwargs["temperature"] = temperature
-                if top_p := params.get("top_p"):
-                    params_kwargs["top_p"] = top_p
-                if top_k := params.get("top_k"):
-                    params_kwargs["top_k"] = top_k
-                if repetition_penalty := params.get("repetition_penalty"):
-                    params_kwargs["repetition_penalty"] = repetition_penalty
-                job_desc.meta_params = Metaparams(**params_kwargs)
-        
-        print(f"Received job {job_desc.job_id}, request {job_desc.request_id}")
-        print(f"Prompt length: {len(job_desc.prompt)} chars")
-
-        # Run text generation in thread pool to prevent blocking
-        print(f"<prompt>\n{job_desc.prompt}\n</prompt>")
-        loop = asyncio.get_event_loop()
-        start = time.time()
-        generated_text = await loop.run_in_executor(
-            None,
-            generate_text,
-            job_desc.prompt,
-            model,
-            tokenizer,
-            job_desc.meta_params.asdict(),
+        job_desc: LLMPromptJob = serialization.load(message.body.decode(), cls=LLMPromptJob)
+    except TypeError as type_error:
+        print(type_error)
+        body = json.loads(message.body.decode())
+        job_desc = LLMPromptJob(
+            job_id=body.get("job_id"),
+            filename=body.get("filename", "") or body.get("transcript_file_name"),
+            reply_to=body.get("reply_to"),
+            prompt=body.get("prompt"),
+            request_id=body.get("request_id"),
         )
-        end = time.time()
-        print(f"Generated {len(generated_text)} chars in {end - start:.2f} seconds")
-        
-        # Prepare response
-        response = wire_formats.LLMPromptResponse.from_llm_prompt_job(job_desc, generated_text=generated_text)
+        params = body.get("params", {})
+        if params:
+            params_kwargs = {}
+            if max_tokens := params.get("max_tokens"):
+                params_kwargs["max_tokens"] = max_tokens
+            if temperature := params.get("temperature"):
+                params_kwargs["temperature"] = temperature
+            if top_p := params.get("top_p"):
+                params_kwargs["top_p"] = top_p
+            if top_k := params.get("top_k"):
+                params_kwargs["top_k"] = top_k
+            if repetition_penalty := params.get("repetition_penalty"):
+                params_kwargs["repetition_penalty"] = repetition_penalty
+            job_desc.meta_params = Metaparams(**params_kwargs)
+    
+    print(f"Received job {job_desc.job_id}, request {job_desc.request_id}")
+    print(f"Prompt length: {len(job_desc.prompt)} chars")
 
-        # Send response with error handling for invalid state
-        try:
-            channel = message.channel
+    # Run text generation in thread pool to prevent blocking
+    print(f"<prompt>\n{job_desc.prompt}\n</prompt>")
+    loop = asyncio.get_event_loop()
+    start = time.time()
+    generated_text = await loop.run_in_executor(
+        None,
+        generate_text,
+        job_desc.prompt,
+        model,
+        tokenizer,
+        job_desc.meta_params.asdict(),
+    )
+    end = time.time()
+    print(f"Generated {len(generated_text)} chars in {end - start:.2f} seconds")
+    
+    # Prepare response
+    response = wire_formats.LLMPromptResponse.from_llm_prompt_job(job_desc, generated_text=generated_text)
+
+    # Send response with fresh connection to avoid stale channel issues
+    async with await dial_rabbit_from_config(config) as rabbitmq_connection:
+        async with await rabbitmq_connection.channel() as channel:
             await channel.queue_declare(job_desc.reply_to, durable=True)
             # Copy headers from the incoming message to the response
             response_headers = {}
-            if message.headers:
+            if hasattr(message, 'headers') and message.headers:
                 response_headers = dict(message.headers)
 
             print(f"publishing response to {job_desc.reply_to}")
-            resp = await channel.basic_publish(
-                body=serialization.dumps(response).encode(),
-                exchange="",
-                routing_key=job_desc.reply_to,
-                properties=Basic.Properties(
+            await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=serialization.dumps(response).encode(),
                     delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                     headers=response_headers if response_headers else None,
                 ),
+                routing_key=job_desc.reply_to,
             )
-            print(f"response from basic publish: {resp}")
-        except (ChannelInvalidStateError, ChannelClosed) as channel_error:
-            print(f"Channel error while sending response for job {job_desc.job_id}: {channel_error}")
-            print(f"Message will be re-queued for retry")
-            await message.nack(requeue=True)
-            return
 
-        print(f"Job {job_desc.job_id} request {job_desc.request_id} completed and response sent")
-        
-        # Acknowledge successful processing
-        await message.ack()
-        
-    except Exception as e:
-        print(f"Error processing message: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Try to send error response if possible
-        try:
-            body = json.loads(message.body.decode())
-            job_id = body.get('job_id', 'unknown')
-            reply_to = body.get('reply_to')
-            request_id = body.get('request_id')
-            
-            if reply_to:
-                error_response = {
-                    'job_id': job_id,
-                    'request_id': request_id,
-                    'status': 'error',
-                    'error': str(e),
-                }
-                
-                try:
-                    channel = message.channel
-                    
-                    # Copy headers from the incoming message to the error response as well
-                    response_headers = {}
-                    if message.headers:
-                        response_headers = dict(message.headers)
-                    
-                    await channel.default_exchange.publish(
-                        aio_pika.Message(
-                            body=json.dumps(error_response).encode(),
-                            headers=response_headers if response_headers else None,
-                        ),
-                        routing_key=reply_to,
-                    )
-                except (ChannelInvalidStateError, ChannelClosed):
-                    print(f"Could not send error response due to channel error - message will be requeued")
-        except Exception as error_e:
-            print(f"Error sending error response: {error_e}")
-        
-        # Nack the message so it gets requeued
-        try:
-            await message.nack(requeue=True)
-        except Exception as nack_error:
-            print(f"Error nacking message: {nack_error}")
+    print(f"Job {job_desc.job_id} request {job_desc.request_id} completed and response sent")
 
 
 async def main(config):
@@ -272,49 +216,42 @@ async def main(config):
     global model_type
     model, tokenizer, model_type = load_quantized_llm_model(device, model_path, hf_model_name)
     
-    ssl_context = create_ssl_context()
-    
     retry_count = 0
     
     while True:
         try:
             # Connect to RabbitMQ
             print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
-            
-            connection = await aio_pika.connect_robust(
-                host=config['host'],
-                port=config['port'],
-                login=config['username'],
-                password=config['password'],
-                ssl=True,
-                ssl_context=ssl_context,
-            )
+            connection = await dial_rabbit_from_config(config)
+            redis_client = await dial_redis_from_config(config)
             
             # Reset retry count on successful connection
             retry_count = 0
             
             async with connection:
-                channel = await connection.channel()
-                await channel.set_qos(prefetch_count=1)
-                
-                work_queue = config['work_queue']
-                queue = await channel.declare_queue(work_queue, durable=True)
+                async with await connection.channel() as channel:
+                    work_queue = config['work_queue']
+                    await channel.declare_queue(work_queue, durable=True)
                 
                 print(f"Successfully connected! Listening for LLM jobs on queue: {work_queue}")
                 print("Waiting for jobs. To exit press CTRL+C")
                 
-                async with queue.iterator() as queue_iter:
+                # Start consuming messages
+                async with CachedMessageIterator(
+                        rabbitmq_connection=connection,
+                        redis_client=redis_client,
+                        queue_name=work_queue,
+                        redis_key_prefix="backup:get_topics",
+                ) as queue_iter:
                     async for message in queue_iter:
                         try:
-                            await process_message(message, model, tokenizer)
-                        except (ChannelInvalidStateError, ChannelClosed) as channel_err:
-                            print(f"Channel error during message processing: {channel_err}")
-                            print("Will attempt to reconnect...")
-                            raise
+                            await process_message(message, model, tokenizer, config)
+                            await queue_iter.mark_processed(message)
                         except Exception as e:
-                            print(f"Unexpected error processing message: {e}")
+                            print(f"Error processing message: {e}")
                             import traceback
                             traceback.print_exc()
+                            # Don't mark as processed if there was an error
                             
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1

@@ -11,6 +11,11 @@ from dataclasses import dataclass
 # from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import urlparse
+import redis.asyncio as redis
+
+import aio_pika
+from aio_pika.abc import AbstractRobustConnection
+
 
 #import torch
 # import torchaudio
@@ -185,15 +190,6 @@ def load_config(config_file):
 
 
 def create_ssl_context(cert_file='server_certificate.pem', verify=True):
-    """Create SSL context for RabbitMQ connections.
-    
-    Args:
-        cert_file: Path to the certificate file
-        verify: Whether to verify certificates (set to False for self-signed)
-    
-    Returns:
-        ssl.SSLContext configured for RabbitMQ
-    """
     ssl_context = ssl.create_default_context(cafile=cert_file)
     if not verify:
         ssl_context.check_hostname = False
@@ -582,3 +578,198 @@ def load_hf_token(token_file="hf_token.txt"):
         raise ValueError(f"Token file is empty: {token_path}")
 
     return token
+
+
+# Redis backup utilities for message resilience
+async def connect_redis(redis_config: dict):
+    """Connect to Redis for message backup.
+    
+    Args:
+        redis_config: Dictionary with Redis connection parameters
+                     (host, port, ssl, ssl_ca_certs, ssl_certfile, ssl_keyfile)
+    
+    Returns:
+        redis.Redis client or None if no config provided
+    """
+    import redis.asyncio as redis
+    
+    if not redis_config:
+        print("Warning: No Redis configuration found. Message backup disabled.")
+        return None
+    
+    redis_client = await redis.Redis(
+        host=redis_config['host'],
+        port=redis_config['port'],
+        ssl=redis_config.get('ssl', False),
+        ssl_ca_certs=redis_config.get('ssl_ca_certs'),
+        ssl_certfile=redis_config.get('ssl_certfile'),
+        ssl_keyfile=redis_config.get('ssl_keyfile'),
+    )
+    print(f"Connected to Redis at {redis_config['host']}:{redis_config['port']}")
+    return redis_client
+
+
+async def backup_message_to_redis(
+    redis_client,
+    semaphore: asyncio.Semaphore,
+    key_prefix: str,
+    identifier: str,
+    message_body: bytes
+):
+    """Backup message to Redis before acknowledging.
+    
+    Args:
+        redis_client: Redis client instance
+        semaphore: Asyncio semaphore for rate limiting
+        key_prefix: Prefix for Redis key (e.g., "backup:diarizations")
+        identifier: Unique identifier for this message
+        message_body: Raw message body bytes
+    """
+    if redis_client is None:
+        return
+
+    key = f"{key_prefix}:{identifier}"
+    async with semaphore:
+        await redis_client.set(key, message_body)
+
+
+async def remove_message_from_redis(
+    redis_client,
+    semaphore: asyncio.Semaphore,
+    key_prefix: str,
+    identifier: str
+):
+    """Remove backed up message from Redis after processing.
+    
+    Args:
+        redis_client: Redis client instance
+        semaphore: Asyncio semaphore for rate limiting
+        key_prefix: Prefix for Redis key
+        identifier: Unique identifier for this message
+    """
+    if redis_client is None:
+        return
+    
+    key = f"{key_prefix}:{identifier}"
+    async with semaphore:
+        await redis_client.delete(key)
+
+
+async def cleanup_redis_backups_by_pattern(
+    redis_client,
+    semaphore: asyncio.Semaphore,
+    pattern: str
+):
+    """Remove all backup messages matching a pattern.
+    
+    Args:
+        redis_client: Redis client instance
+        semaphore: Asyncio semaphore for rate limiting
+        pattern: Redis key pattern (e.g., "backup:filename:*")
+    """
+    if redis_client is None:
+        return
+    
+    cursor = 0
+    while True:
+        async with semaphore:
+            cursor, keys = await redis_client.scan(cursor, match=pattern, count=100)
+            if keys:
+                await redis_client.delete(*keys)
+            if cursor == 0:
+                break
+    print(f"Cleaned up Redis backups matching pattern: {pattern}")
+
+
+async def recover_messages_from_redis(
+    redis_client,
+    semaphore: asyncio.Semaphore,
+    pattern: str,
+    deserialize_func,
+    process_func
+):
+    """Recover messages from Redis after a crash or restart.
+    
+    Args:
+        redis_client: Redis client instance
+        semaphore: Asyncio semaphore for rate limiting
+        pattern: Redis key pattern to match (e.g., "backup:*")
+        deserialize_func: Function to deserialize message body
+        process_func: Function to process each recovered message
+                     Should accept (key, deserialized_message)
+    
+    Returns:
+        Number of messages recovered
+    """
+    if redis_client is None:
+        print("No Redis connection - skipping recovery")
+        return 0
+    
+    print("Checking Redis for backed up messages...")
+    cursor = 0
+    recovered_count = 0
+    
+    # Collect all backup keys
+    all_keys = []
+    while True:
+        async with semaphore:
+            cursor, keys = await redis_client.scan(cursor, match=pattern, count=100)
+            all_keys.extend(keys)
+            if cursor == 0:
+                break
+    
+    if not all_keys:
+        print("No backed up messages found in Redis")
+        return 0
+    
+    print(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
+    
+    # Process each backed up message
+    for key in all_keys:
+        try:
+            # Get the message body from Redis
+            async with semaphore:
+                message_body = await redis_client.get(key)
+            
+            if message_body is None:
+                continue
+            
+            # Deserialize and process
+            deserialized = deserialize_func(message_body.decode())
+            await process_func(key, deserialized)
+            
+            recovered_count += 1
+            
+        except Exception as e:
+            print(f"Error recovering message from key {key}: {e}")
+            continue
+    
+    print(f"Successfully recovered {recovered_count} messages from Redis")
+    return recovered_count
+
+async def dial_rabbit_from_config(config: dict) -> AbstractRobustConnection:
+    print(f"Creating new RabbitMQ connection to {config['host']}:{config['port']}...")
+    rabbit_connection = await aio_pika.connect_robust(
+        host=config['host'],
+        port=config['port'],
+        login=config['username'],
+        password=config['password'],
+        ssl=True,
+        ssl_context=create_ssl_context(),
+        heartbeat=60,
+    )
+    print("RabbitMQ connection established successfully")
+    
+    return rabbit_connection
+
+async def dial_redis_from_config(redis_config: dict) -> redis.Redis:
+    if "redis" in redis_config:
+        redis_config = redis_config["redis"]
+    return await redis.Redis(
+        host=redis_config['host'],
+        port=redis_config['port'],
+        ssl=redis_config.get('ssl', False),
+        ssl_ca_certs=redis_config.get('ssl_ca_certs'),
+        ssl_certfile=redis_config.get('ssl_certfile'),
+        ssl_keyfile=redis_config.get('ssl_keyfile'),
+    )

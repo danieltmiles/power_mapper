@@ -10,7 +10,8 @@ from pamqp.commands import Basic
 from transformers import AutoTokenizer, Qwen2Tokenizer
 
 import serialization
-from utils import load_config, create_ssl_context, get_answer
+from cached_iterator import CachedMessageIterator
+from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import WhisperResult, LLMPromptJob, LLMPromptResponse, Metaparams, CleanedWhisperResult
 
 
@@ -108,70 +109,63 @@ async def send_to_llm_queue(
 
 async def process_message(
     message: AbstractIncomingMessage,
-    connection: AbstractRobustConnection,
     results_queue: str,
-    semaphore: asyncio.Semaphore,
+    config: dict,
 ):
     """
     Process an LLM cleanup job message from RabbitMQ.
     """
-    try:
-        print(f"Received message")
-        whisper_result: WhisperResult = serialization.load(message.body.decode())
+    print(f"Received message")
+    whisper_result: WhisperResult = serialization.load(message.body.decode())
 
-        # Normal segment processing
-        segment_count = whisper_result.segment_count
-        total_segments = whisper_result.total_segments
-        text = whisper_result.transcript.get("text", "")
+    # Normal segment processing
+    segment_count = whisper_result.segment_count
+    total_segments = whisper_result.total_segments
+    text = whisper_result.transcript.get("text", "")
 
-        print(f"Processing job, segment {segment_count}/{total_segments}")
-        print(f"length of transcript text: {len(text)}")
+    print(f"Processing job, segment {segment_count}/{total_segments}")
+    print(f"length of transcript text: {len(text)}")
 
-        if len(text) < 50:
-            print(f"Transcript text is very short, skipping cleanup and sending original text")
-            cleaned_text = text
-        else:
-            # Create prompt and send to LLM queue
+    if len(text) < 50:
+        print(f"Transcript text is very short, skipping cleanup and sending original text")
+        cleaned_text = text
+    else:
+        # Create prompt and send to LLM queue - dial fresh connection for this
+        async with await dial_rabbit_from_config(config) as rabbitmq_connection:
             prompt = create_cleanup_prompt(text)
             generated = await send_to_llm_queue(
-                connection,
+                rabbitmq_connection,
                 prompt,
                 filename=f"segment_{segment_count}"
             )
 
             if generated is None:
                 print(f"Error: No response from LLM queue for segment {segment_count}")
-                await message.nack(requeue=True)
                 return
 
             print(f"generated: {generated}")
 
             cleaned_text = get_answer(generated, "```corrected_transcript", "```")
 
-        if cleaned_text:
-            print(f"cleaned_text={cleaned_text}")
-        else:
-            print(f"Warning: Could not extract cleaned text, using original")
-            cleaned_text = text
+    if cleaned_text:
+        print(f"cleaned_text={cleaned_text}")
+    else:
+        print(f"Warning: Could not extract cleaned text, using original")
+        cleaned_text = text
 
-        # Prepare response
-        response = CleanedWhisperResult(cleaned_transcript=cleaned_text, whisper_result=whisper_result)
-        await message.channel.basic_publish(
-            body=serialization.dumps(response).encode(),
-            exchange="",
-            routing_key=results_queue,
-            properties=Basic.Properties(
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-            ),
-        )
+    # Prepare response and publish with fresh connection
+    response = CleanedWhisperResult(cleaned_transcript=cleaned_text, whisper_result=whisper_result)
+    async with await dial_rabbit_from_config(config) as rabbitmq_connection:
+        async with await rabbitmq_connection.channel() as channel:
+            await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=serialization.dumps(response).encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key=results_queue,
+            )
 
-        print(f"segment {segment_count} completed and response sent to {results_queue}")
-
-        # Acknowledge successful processing
-        await message.ack()
-    finally:
-        # Always release the semaphore when done
-        semaphore.release()
+    print(f"segment {segment_count} completed and response sent to {results_queue}")
 
 
 async def main(config):
@@ -185,58 +179,42 @@ async def main(config):
     max_retries = 10
     base_retry_delay = 2  # seconds
     max_retry_delay = 60  # seconds
-
-    ssl_context = create_ssl_context()
+    
     retry_count = 0
     
     while True:
         try:
             # Connect to RabbitMQ with TLS
             print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
-            
-            connection = await aio_pika.connect_robust(
-                host=config['host'],
-                port=config['port'],
-                login=config['username'],
-                password=config['password'],
-                ssl=True,
-                ssl_context=ssl_context,
-            )
+            connection = await dial_rabbit_from_config(config)
+            redis_client = await dial_redis_from_config(config)
             
             # Reset retry count on successful connection
             retry_count = 0
             
             async with connection:
-                # Create channel
-                channel = await connection.channel()
-                
-                # Set QoS to process three messages concurrently
-                await channel.set_qos(prefetch_count=3)
-                
-                # Declare the work queue
-                work_queue = config['work_queue']
-                results_queue = config["results_queue"]
-                queue, _ = await asyncio.gather(
-                    channel.declare_queue(work_queue, durable=True),
-                    channel.declare_queue(results_queue, durable=True),
-                )
+                async with await connection.channel() as channel:
+                    # Declare the work queue
+                    work_queue = config['work_queue']
+                    results_queue = config["results_queue"]
+                    await asyncio.gather(
+                        channel.declare_queue(work_queue, durable=True),
+                        channel.declare_queue(results_queue, durable=True),
+                    )
                 
                 print(f"Successfully connected! Listening for LLM cleanup jobs on queue: {work_queue}")
-                print(f"Processing up to 3 messages concurrently")
                 print("Waiting for cleanup jobs. To exit press CTRL+C")
                 
-                # Semaphore to limit concurrent processing to 3
-                semaphore = asyncio.Semaphore(3)
-                
                 # Start consuming messages
-                async with queue.iterator() as queue_iter:
+                async with CachedMessageIterator(
+                        rabbitmq_connection=connection,
+                        redis_client=redis_client,
+                        queue_name=work_queue,
+                        redis_key_prefix="backup:clean",
+                ) as queue_iter:
                     async for message in queue_iter:
-                        # Acquire semaphore before creating task (blocks if 3 tasks already running)
-                        await semaphore.acquire()
-                        
-                        # Create task for concurrent processing
-                        # Task will release semaphore in its finally block
-                        asyncio.create_task(process_message(message, connection, results_queue, semaphore))
+                        await process_message(message, results_queue, config)
+                        await queue_iter.mark_processed(message)
                             
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1

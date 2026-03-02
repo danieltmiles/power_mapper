@@ -1,7 +1,6 @@
 import json
 import pickle
 import base64
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +12,12 @@ import asyncio
 
 
 import pyannote.audio
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel
+from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, AbstractRobustConnection
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 from pyannote.audio.tasks import SpeakerDiarization
 
 import serialization
+from cached_iterator import CachedMessageIterator
 from wire_formats import TranscriptMetadata, DiarizationResponse
 
 torch.serialization.add_safe_globals([pyannote.audio.core.task.Specifications])
@@ -30,7 +30,8 @@ from pyannote.audio.pipelines.speaker_diarization import DiarizeOutput
 from pyannote.audio.core.task import Specifications
 
 import shared_disks
-from utils import normalize_audio, load_config, create_ssl_context, load_hf_token
+from utils import normalize_audio, load_config, create_ssl_context, load_hf_token, dial_rabbit_from_config, \
+    dial_redis_from_config
 
 # Set device for PyTorch
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
@@ -78,7 +79,6 @@ def serialize_diarization(diarization):
 async def process_message(
     message: AbstractIncomingMessage,
     pipeline: SpeakerDiarization,
-    channel: AbstractRobustChannel,
     destination_queue_name: str,
     config: dict[str, Any],
 ):
@@ -103,15 +103,7 @@ async def process_message(
     if isinstance(signal, torch.Tensor):
         signal = signal.to(torch.device(device))
 
-    # Run diarization in thread pool to prevent blocking the event loop
-    loop = asyncio.get_event_loop()
-    diarization = await loop.run_in_executor(
-        None,
-        perform_diarization,
-        signal,
-        sr,
-        pipeline
-    )
+    diarization = perform_diarization(signal, sr, pipeline)
 
     # Serialize result
     diarization_encoded = serialize_diarization(diarization)
@@ -120,26 +112,17 @@ async def process_message(
     response = DiarizationResponse(diarization=diarization_encoded, transcript_metadata=transcript_metadata)
     routing_key = destination_queue_name
 
-    # Get channel from message with error handling for invalid state
-    try:
-        await channel.declare_queue(routing_key, durable=True)
-        await channel.default_exchange.publish(
-            aio_pika.Message(
-                body=serialization.dumps(response).encode("utf-8"),
-            ),
-            routing_key=routing_key,
-        )
-    except (ChannelInvalidStateError, ChannelClosed) as channel_error:
-        print(f"Channel error while sending response {channel_error}")
-        print(f"Message will be re-queued for retry")
-        # Nack the message so it gets requeued
-        await message.nack(requeue=True)
-        return
+    async with await dial_rabbit_from_config(config) as rabbitmq_connection:
+        async with await rabbitmq_connection.channel() as channel:
+            resp = await channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=serialization.dumps(response).encode("utf-8"),
+                ),
+                routing_key=routing_key,
+            )
+            print(f"response from default exchange publish: {resp}")
 
     print(f"Job completed and response sent to {routing_key}")
-
-    # Acknowledge successful processing
-    await message.ack()
 
 async def main(config):
     """
@@ -173,61 +156,31 @@ async def main(config):
         try:
             # Connect to RabbitMQ with TLS
             print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
-            connection = await aio_pika.connect_robust(
-                host=config['host'],
-                port=config['port'],
-                login=config['username'],
-                password=config['password'],
-                ssl=True,
-                ssl_context=ssl_context,
-            )
-
+            connection = await dial_rabbit_from_config(config)
+            redis_client = await dial_redis_from_config(config)
             async with connection:
-                channel: AbstractRobustChannel = await connection.channel()
-
-                # Set QoS to process one message at a time
-                await channel.set_qos(prefetch_count=1)
-                
-                # Declare the work queue
-                work_queue = config['work_queue']
-                destination_queue = config.get("destination_queue", "diarizations")
-                queue, _ = await asyncio.gather(
-                    channel.declare_queue(work_queue, durable=True),
-                    channel.declare_queue(destination_queue, durable=True),
-                )
+                async with await connection.channel() as channel:
+                    # Declare the work queue
+                    work_queue = config['work_queue']
+                    destination_queue = config.get("destination_queue", "diarizations")
+                    await asyncio.gather(
+                        channel.declare_queue(work_queue, durable=True),
+                        channel.declare_queue(destination_queue, durable=True),
+                    )
 
                 print(f"Successfully connected! Listening for diarization jobs on queue: {work_queue}")
                 print("Waiting for diarization jobs. To exit press CTRL+C")
                 
                 # Start consuming messages
-                async with queue.iterator() as queue_iter:
+                async with CachedMessageIterator(
+                        rabbitmq_connection=connection,
+                        redis_client=redis_client,
+                        queue_name=work_queue,
+                        redis_key_prefix="backup:dads",
+                ) as queue_iter:
                     async for message in queue_iter:
-                        try:
-                            await process_message(message, pipeline, channel, destination_queue, config)
-                        except (ChannelInvalidStateError, ChannelClosed) as channel_err:
-                            print(f"Channel error during message processing: {channel_err}")
-                            raise
-                        except Exception as e:
-                            print(f"Unexpected error processing message: {e}")
-                            import traceback
-                            tb_str = traceback.format_exc()
-                            print(tb_str)
-                            dead_letter_key = "dead_letter"
-                            dead_letter_body = {
-                                "message": message.body.decode(),
-                                "error": tb_str,
-                                "pipeline_step": "dads",
-                            }
-                            await channel.declare_queue(dead_letter_key, durable=True)
-                            await channel.default_exchange.publish(
-                                aio_pika.Message(
-                                    body=json.dumps(dead_letter_body).encode("utf-8"),
-                                ),
-                                routing_key=dead_letter_key,
-                            )
-                            if not message.processed:
-                                print("Message that caused error was not acknowledged. Acknowledging to prevent reprocessing.")
-                                await message.ack()
+                        await process_message(message, pipeline, destination_queue, config)
+                        await queue_iter.mark_processed(message)
 
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1

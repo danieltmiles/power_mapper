@@ -12,11 +12,12 @@ from transformers import AutoTokenizer, Qwen2Tokenizer
 
 import serialization
 import wire_formats
-from utils import load_config, create_ssl_context, get_answer
+from cached_iterator import CachedMessageIterator
+from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import Metaparams
 
 
-def create_solr_prompt(filename: str, tokenizer: Qwen2Tokenizer) -> str:
+def create_transcript_metadata_prompt(filename: str, tokenizer: Qwen2Tokenizer) -> str:
     consider_template = (
         "Consider the following file name of a transcript: `{filename}`\n"
         "From that filename, can you infer a meeting title, session type, date and video ID? "
@@ -58,15 +59,14 @@ def create_solr_prompt(filename: str, tokenizer: Qwen2Tokenizer) -> str:
     ]
     return tokenizer.apply_chat_template(conversation, tokenize=False)
 
-async def process_message(
+async def get_transcript_metadata_from_llm(
     message: AbstractIncomingMessage,
     connection: AbstractRobustConnection,
     tokenizer: Qwen2Tokenizer,
 ) -> wire_formats.LLMPromptResponse | None:
-    # Parse the incoming message
     body = json.loads(message.body.decode())
     filename = body.get("filename")
-    prompt = create_solr_prompt(filename, tokenizer)
+    prompt = create_transcript_metadata_prompt(filename, tokenizer)
     reply_to = f"mint/reply/{str(uuid.uuid4())}"
     job_desc = wire_formats.LLMPromptJob(
         job_id=str(uuid.uuid4()),
@@ -106,80 +106,102 @@ async def process_message(
 
 
 
+async def process_message(
+    message: AbstractIncomingMessage,
+    tokenizer: Qwen2Tokenizer,
+    result_queue: str,
+    config: dict,
+):
+    """Process a single message"""
+    try:
+        # Dial a fresh connection for publishing
+        async with await dial_rabbit_from_config(config) as rabbitmq_connection:
+            resp: wire_formats.LLMPromptResponse = await get_transcript_metadata_from_llm(message, rabbitmq_connection, tokenizer)
+            answer_str = get_answer(resp.generated_text, start_delim="```json", end_delim="```")
+            try:
+                answer = wire_formats.TranscriptMetadata(**json.loads(answer_str))
+            except TypeError:
+                print(f"Failed to parse answer JSON: {answer_str}")
+                return
+            except JSONDecodeError as jde:
+                print(f"Invalid JSON format in answer: {answer_str}\nError: {jde}")
+                return
+
+            async with await rabbitmq_connection.channel() as pub_channel:
+                await pub_channel.default_exchange.publish(
+                    aio_pika.Message(
+                        body=serialization.dumps(answer).encode("utf-8"),
+                    ),
+                    routing_key=result_queue,
+                )
+    except Exception as e:
+        print(f"Error processing message: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def main(config):
     """
     Main function to start the RabbitMQ consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
-    Processes up to 3 messages concurrently using a semaphore.
     """
     print("Initializing RabbitMQ consumer...")
     
-    ssl_context = create_ssl_context()
+    # Retry configuration
+    max_retries = 10
+    base_retry_delay = 2  # seconds
+    max_retry_delay = 60  # seconds
     
-    print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+    print(f"Loading tokenizer...")
     tokenizer: Qwen2Tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-32B")
-    connection = await aio_pika.connect_robust(
-        host=config['host'],
-        port=config['port'],
-        login=config['username'],
-        password=config['password'],
-        ssl=True,
-        ssl_context=ssl_context,
-    )
+    
+    retry_count = 0
+    
+    while True:
+        try:
+            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            connection = await dial_rabbit_from_config(config)
+            redis_client = await dial_redis_from_config(config)
+            
+            async with connection:
+                async with await connection.channel() as channel:
+                    # Declare the work queue
+                    work_queue = config['work_queue']
+                    result_queue = config["result_queue"]
+                    await asyncio.gather(
+                        channel.declare_queue(work_queue, durable=True),
+                        channel.declare_queue(result_queue, durable=True),
+                    )
 
-    async with connection:
-        channel: AbstractRobustChannel = await connection.channel()
-        await channel.set_qos(prefetch_count=3)
-
-        work_queue = config['work_queue']
-        result_queue = config["result_queue"]
-        work_queue = await channel.declare_queue(work_queue, durable=True)
-        await channel.declare_queue(result_queue, durable=True)
-
-        print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
-        print("Waiting for messages (processing up to 3 concurrently). To exit press CTRL+C")
-
-        # Create a semaphore to limit concurrent message processing to 3
-        semaphore = asyncio.Semaphore(3)
-        tasks = set()
-
-        async def process_with_semaphore(message: AbstractIncomingMessage):
-            """Process a single message with semaphore control"""
-            async with semaphore:
-                try:
-                    resp: wire_formats.LLMPromptResponse = await process_message(message, connection, tokenizer)
-                    answer_str = get_answer(resp.generated_text, start_delim="```json", end_delim="```")
-                    try:
-                        answer = wire_formats.TranscriptMetadata(**json.loads(answer_str))
-                    except TypeError:
-                        print(f"Failed to parse answer JSON: {answer_str}")
-                        return
-                    except JSONDecodeError as jde:
-                        print(f"Invalid JSON format in answer: {answer_str}\nError: {jde}")
-                        await message.nack()
-                        return
-                    
-                    async with await connection.channel() as pub_channel:
-                        await pub_channel.default_exchange.publish(
-                            aio_pika.Message(
-                                body=serialization.dumps(answer).encode("utf-8"),
-                            ),
-                            routing_key=result_queue,
-                        )
-                    await message.ack()
-                except Exception as e:
-                    print(f"Error processing message: {e}")
-                    await message.nack(requeue=True)
-
-        async with work_queue.iterator() as queue_iter:
-            async for message in queue_iter:
-                # Create a task for processing the message
-                task = asyncio.create_task(process_with_semaphore(message))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
+                print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
+                print("Waiting for messages. To exit press CTRL+C")
                 
-                # Clean up completed tasks
-                tasks = {t for t in tasks if not t.done()}
+                # Start consuming messages
+                async with CachedMessageIterator(
+                        rabbitmq_connection=connection,
+                        redis_client=redis_client,
+                        queue_name=work_queue,
+                        redis_key_prefix="backup:mint",
+                ) as queue_iter:
+                    async for message in queue_iter:
+                        await process_message(message, tokenizer, result_queue, config)
+                        await queue_iter.mark_processed(message)
+
+        except (Exception,) as conn_error:
+            retry_count += 1
+            if retry_count > max_retries:
+                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                raise
+            
+            # Calculate exponential backoff delay
+            delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
+            print(f"Connection error: {conn_error}")
+            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            await asyncio.sleep(delay)
+            
+        except KeyboardInterrupt:
+            print("\nShutting down gracefully...")
+            break
 
 
 if __name__ == "__main__":

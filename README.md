@@ -1,6 +1,20 @@
 # Power Mapper Pipeline
 
-A comprehensive audio transcription and analysis pipeline for processing YouTube videos through multiple AI services.
+Takes unstructured data, uses AI pipeline to make it usable.
+
+## Goals
+I have two co-equal goals in developing this code: Personal education/development, and that I hope it will be
+genuinely useful. Please look kindly on the code, I'm developing it on my own in my spare time. I understand
+there are standards I'm not following, such as an OpenAI-compatible web service for LLM requests, or even Ollama
+Server. I've chosen to roll my own code for those things, not because it's the right technical dexisionto do but
+because it helps me educate myself. It is also a project in very early stages.
+
+Goal: Take in unstructured data like YouTube videos of city council meetings, news articles, congressional voting
+records, speeches, and anything else we can think to feed it. Produce a, "power map." -- A graph in a graphing
+database of which people care about which issues, do they support or oppose the issues, what are their connections,
+both to other people and to organizations?
+
+Ideally, this will help answer questions like, "I care about Issue X, how do I get involved?"
 
 ## System Architecture
 

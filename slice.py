@@ -25,8 +25,10 @@ import aio_pika
 import numpy as np
 from aiormq import ChannelInvalidStateError, AMQPError, ChannelClosed
 
+import redis.asyncio as redis
 import serialization
 import shared_disks
+from cached_iterator import CachedMessageIterator
 from utils import diarized_segment_iter, assign_speaker_to_segment, normalize_audio, create_ssl_context
 from wire_formats import DiarizationResponse, WhisperJobDescription, WhisperJobAudioSegment
 
@@ -336,12 +338,18 @@ class AssembleDiarizationService:
         """
         Run the service - consume from diarization-reply queue.
         """
+        redis_config = self.config["redis"]
+        redis_client = await redis.Redis(
+            host=redis_config['host'],
+            port=redis_config['port'],
+            ssl=redis_config.get('ssl', False),
+            ssl_ca_certs=redis_config.get('ssl_ca_certs'),
+            ssl_certfile=redis_config.get('ssl_certfile'),
+            ssl_keyfile=redis_config.get('ssl_keyfile'),
+        )
         print(f"\n{'='*60}")
         print("Starting Assemble Diarization Service")
         print(f"{'='*60}\n")
-        
-        # Connect to RabbitMQ
-        ssl_context = create_ssl_context()
 
         while True:
             try:
@@ -351,7 +359,7 @@ class AssembleDiarizationService:
                     login=self.config['username'],
                     password=self.config['password'],
                     ssl=True,
-                    ssl_context=ssl_context,
+                    ssl_context=create_ssl_context(),
                 )
                 async with connection:
                     channel = await connection.channel()
@@ -367,15 +375,16 @@ class AssembleDiarizationService:
                     print("Waiting for messages... (Press Ctrl+C to exit)\n")
 
                     # Consume messages
-                    async with diarization_queue.iterator() as queue_iter:
+                    async with CachedMessageIterator(
+                            rabbitmq_connection=connection,
+                            redis_client=redis_client,
+                            queue_name=self.work_queue,
+                            redis_key_prefix="backup:slice",
+                    ) as queue_iter:
                         async for message in queue_iter:
-                            async with message.process(requeue=True):
-                                try:
-                                    diarization_result: DiarizationResponse = serialization.load(message.body.decode())
-                                    await self.process_diarization_result(diarization_result, channel)
-                                except json.JSONDecodeError as e:
-                                    print(f"✗ Failed to decode message: {e}")
-                                    raise
+                            diarization_result: DiarizationResponse = serialization.load(message.body.decode())
+                            await self.process_diarization_result(diarization_result, channel)
+                            await queue_iter.mark_processed(message)
             except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError, Exception) as conn_error:
                 try:
                     # re-dial
