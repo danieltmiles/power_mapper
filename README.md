@@ -23,6 +23,8 @@ flowchart TD
     Start([Download YouTube Video]) --> Audio[Audio File MP3]
     
     Audio --> MINT[MINT Service<br/>Metadata Inference for<br/>Named Transcripts]
+    MINT --> |get details from filename| LLM[LLM]
+    LLM --> |Inferred Metadata| MINT
     MINT --> |Filename, Date, Title| DADS[DADS Service<br/>Diarization and<br/>Detection Service]
     
     DADS --> |Speaker Segments<br/>+ Metadata| SLICE[SLICE Service<br/>Segment and Label<br/>Individual Chunks for Extraction]
@@ -30,23 +32,32 @@ flowchart TD
     
     Whisper --> |Raw Transcription<br/>+ Speaker Labels<br/>+ Start/End Times| CLEAN[CLEAN Service<br/>Contextual Language Error<br/>Analysis and Normalization]
     
+    CLEAN --> |Clean transcript prompt| LLM
+    LLM --> |Cleaned Transcription| CLEAN
     CLEAN --> |Cleaned Transcription<br/>+ All Metadata| GATE[GATE Service<br/>Guess Assessment and<br/>Transcription Evaluation]
     
-    GATE --> |Rejected| Queue1[Requeue for<br/>Re-processing]
-    GATE --> |Accepted| DB1[(Database<br/>Segments)]
-    GATE --> |Accepted| GateSplit{Split Topology<br/>Topic Exchange}
+    GATE --> |Rejected<br/>Requeue for reprocessing| CLEAN
+    GATE --> |Accepted| AcceptedSplit{Accepted}
+    AcceptedSplit --> DBTranscriptions[(Database<br/>transcriptions collection)]
+    AcceptedSplit --> NAME[NAME Service<br/>Natural Attribution from<br/>Mentioned Entities]
     
-    GateSplit --> NAME[NAME Service<br/>Natural Attribution from<br/>Mentioned Entities]
-    NAME --> |Speaker Names<br/>+ Confidence Scores| DB2[(Database<br/>Update Speakers)]
-    GateSplit --> Topics[Get Topics Service]
-    GateSplit --> People[Get People Service]
-    GateSplit --> Orgs[Get Organizations Service]
+    NAME --> |Determine Speaker Names Prompt| LLM
+    LLM --> |Speaker Names| NAME
+    NAME --> |Transcript Chunks With Names| GateSplit{Split Topology<br/>Topic Exchange}
+    NAME --> |Speaker Names<br/>+ Confidence Scores| DBTranscriptions
+    GateSplit --> |Transcript Chunks With Names| Topics[Get Topics Service]
+    GateSplit --> |Transcript Chunks With Names| People[Get People Service]
+    GateSplit --> |Transcript Chunks With Names| Orgs[Get Organizations Service]
     
-    Topics --> |Topics + Descriptions| DB3[(Database<br/>Topics)]
-    People --> |People + Descriptions| DB4[(Database<br/>People)]
-    Orgs --> |Organizations + Descriptions| DB5[(Database<br/>Organizations)]
-    
-    Queue1 -.-> CLEAN
+    Topics --> |Extract Topics Prompt| LLM
+    LLM --> |Topics| Topics
+    Topics --> |Topics + Descriptions| DBTopics[(Database<br/>Topics Collection)]
+    People --> |Extract People Prompt| LLM
+    LLM --> |People| People
+    People --> |People + Descriptions| DBPeople[(Database<br/>People Collection)]
+    Orgs --> |Extract Orgs Prompt| LLM
+    LLM --> |Orgs| ORGS
+    Orgs --> |Organizations + Descriptions| DBOrgs[(Database<br/>Organizations Collection)]
     
     style MINT fill:#000,stroke:#fff,color:#fff
     style DADS fill:#000,stroke:#fff,color:#fff
@@ -58,11 +69,10 @@ flowchart TD
     style Topics fill:#000,stroke:#fff,color:#fff
     style People fill:#000,stroke:#fff,color:#fff
     style Orgs fill:#000,stroke:#fff,color:#fff
-    style DB1 fill:#000,stroke:#fff,color:#fff
-    style DB2 fill:#000,stroke:#fff,color:#fff
-    style DB3 fill:#000,stroke:#fff,color:#fff
-    style DB4 fill:#000,stroke:#fff,color:#fff
-    style DB5 fill:#000,stroke:#fff,color:#fff
+    style DBTranscriptions fill:#000,stroke:#fff,color:#fff
+    style DBTopics fill:#000,stroke:#fff,color:#fff
+    style DBPeople fill:#000,stroke:#fff,color:#fff
+    style DBOrgs fill:#000,stroke:#fff,color:#fff
 ```
 
 ## Pipeline Stages
