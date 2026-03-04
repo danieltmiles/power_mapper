@@ -380,6 +380,7 @@ class AssembleDiarizationService:
                             redis_client=redis_client,
                             queue_name=self.work_queue,
                             redis_key_prefix="backup:slice",
+                            config=self.config,
                     ) as queue_iter:
                         async for message in queue_iter:
                             diarization_result: DiarizationResponse = serialization.load(message.body.decode())

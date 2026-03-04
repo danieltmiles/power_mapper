@@ -110,10 +110,26 @@ async def main(config):
             # Reset retry count on successful connection
             retry_count = 0
 
+            # 143 filenames - 12:18 Mar 03
             async with connection:
                 async with await connection.channel() as channel:
-                    work_queue = config['work_queue']
-                    await channel.declare_queue(work_queue, durable=True)
+
+                    chunks_exchange, unrouted_chunks_exchange, unrouted_chunks_queue, work_queue = asyncio.gather(
+                        channel.declare_exchange(
+                            f"{config['accepted_queue']}.unrouted",
+                            aio_pika.ExchangeType.FANOUT,
+                            durable=True
+                        ),
+                        channel.declare_exchange(
+                            config["accepted_queue"],
+                            aio_pika.ExchangeType.TOPIC,
+                            durable=True,
+                            arguments={"alternate-exchange": f"{config['accepted_queue']}.unrouted"}
+                        ),
+                        channel.declare_queue("unrouted_messages", durable=True),
+                        channel.declare_queue(config['work_queue'], durable=True)
+                    )
+
 
                 print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
                 print("Waiting for messages. To exit press CTRL+C")
@@ -124,6 +140,7 @@ async def main(config):
                         redis_client=redis_client,
                         queue_name=work_queue,
                         redis_key_prefix="backup:nameconsumer",
+                        config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
                         try:

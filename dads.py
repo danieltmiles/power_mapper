@@ -177,6 +177,7 @@ async def main(config):
                         redis_client=redis_client,
                         queue_name=work_queue,
                         redis_key_prefix="backup:dads",
+                        config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
                         await process_message(message, pipeline, destination_queue, config)

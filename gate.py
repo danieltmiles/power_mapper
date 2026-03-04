@@ -190,25 +190,11 @@ async def main(config):
 
             async with connection:
                 async with await connection.channel() as channel:
-                    work_queue, alt_exchange, accepted_exchange, unrouted_queue, retry_queue, accepted_queue = await asyncio.gather(
+                    work_queue, retry_queue, accepted_queue = await asyncio.gather(
                         channel.declare_queue(config["work_queue"], durable=True),
-                        channel.declare_exchange(
-                            f"{config['accepted_queue']}.unrouted",
-                            aio_pika.ExchangeType.FANOUT,
-                            durable=True
-                        ),
-                        channel.declare_exchange(
-                            config["accepted_queue"],
-                            aio_pika.ExchangeType.TOPIC,
-                            durable=True,
-                            arguments={"alternate-exchange": f"{config['accepted_queue']}.unrouted"}
-                        ),
-                        channel.declare_queue("unrouted_messages", durable=True),
                         channel.declare_queue(config["retry_queue"], durable=True),
                         channel.declare_queue(config["accepted_queue"], durable=True,)
                     )
-                    await unrouted_queue.bind(alt_exchange)
-                    await accepted_queue.bind(accepted_exchange, routing_key=config["accepted_queue"])
 
                 print(f"Successfully connected! Listening for jobs on queue: {config['work_queue']}")
                 print("Waiting for messages. To exit press CTRL+C")
@@ -219,6 +205,7 @@ async def main(config):
                         redis_client=redis_client,
                         queue_name=config["work_queue"],
                         redis_key_prefix="backup:gate",
+                        config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
                         await process_message(message, config)

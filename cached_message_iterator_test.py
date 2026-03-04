@@ -40,6 +40,7 @@ async def test_cached_message_iterator(mocker: MockerFixture):
             redis_client=redis_client,
             queue_name="my_queue",
             redis_key_prefix="backup:my_service",
+            config={},
     ) as iterator:
         async for message in iterator:
             recvd_bodies.append(message.body.decode())

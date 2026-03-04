@@ -228,9 +228,10 @@ async def main(config, concurrent: int = 3):
                         redis_client=redis_client,
                         queue_name=work_queue,
                         redis_key_prefix="backup:clean",
+                        config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
-                        # Wait if we're at capacity
+                        # Wait if we're a/t capacity
                         while len(active_tasks) >= concurrent:
                             # Wait for at least one task to complete
                             done, active_tasks = await asyncio.wait(

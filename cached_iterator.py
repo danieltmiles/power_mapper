@@ -1,11 +1,15 @@
 import hashlib
 import pickle
 from asyncio import Semaphore
-from typing import Protocol, Iterator
+from typing import Protocol, Iterator, Any
 
 import aiormq
 import redis.asyncio as redis
 from aio_pika.abc import AbstractRobustConnection, AbstractIncomingMessage, AbstractChannel
+from aiormq import ChannelInvalidStateError
+
+from utils import dial_rabbit_from_config
+
 
 class CachedIncomingMessage(AbstractIncomingMessage):
     # TODO: maybe in the future this will need to cache other things, like headers or what not
@@ -59,6 +63,7 @@ class CachedMessageIterator:
         queue_name: str,
         redis_key_prefix: str,
         redis_concurrency_limit: int = 10,
+        config: dict[str, Any] = None,
     ):
         self.rabbitmq_connection = rabbitmq_connection
         self.redis_client = redis_client
@@ -68,6 +73,7 @@ class CachedMessageIterator:
         self.redis_semaphore = Semaphore(self.redis_concurrency_limit)
         self.cached_messages = []
         self.active_message_keys_by_body_hash = {}
+        self.config = config
 
     async def __aexit__(self, *_args, **_kwargs):
         pass
@@ -95,12 +101,13 @@ class CachedMessageIterator:
                     self.active_message_keys_by_body_hash[self.md5sum(message_body)] = key
                     self.cached_messages.append(message_body)
 
+        await self.establish_channel_and_queue()
+        return self
+
+    async def establish_channel_and_queue(self):
         self.channel = await self.rabbitmq_connection.channel()
-        # prefetch_count=1 ensures one message at a time for proper ack flow
-        # 0 would mean unlimited, which can cause issues with acknowledgments
         await self.channel.set_qos(prefetch_count=1)
         self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
-        return self
 
     @classmethod
     def md5sum(cls, s: str | bytes) -> str:
@@ -118,15 +125,22 @@ class CachedMessageIterator:
         for message in self.cached_messages:
             body = message if isinstance(message, bytes) else message.encode("utf-8")
             yield CachedIncomingMessage(body=body)
-        # Explicitly set no_ack=False to ensure manual acknowledgment mode
-        async with self.queue.iterator(no_ack=False) as queue_iter:
-            async for message in queue_iter:
-                redis_key = self._get_redis_key(message)
-                body = message.body.decode()
-                self.active_message_keys_by_body_hash[self.md5sum(body)] = redis_key
-                await self.redis_client.set(redis_key, body)
-                await message.ack()
-                yield message
+        while True:
+            # Explicitly set no_ack=False to ensure manual acknowledgment mode
+            async with self.queue.iterator(no_ack=False) as queue_iter:
+                async for message in queue_iter:
+                    try:
+                        redis_key = self._get_redis_key(message)
+                        body = message.body.decode()
+                        self.active_message_keys_by_body_hash[self.md5sum(body)] = redis_key
+                        await self.redis_client.set(redis_key, body)
+                        await message.ack()
+                        yield message
+                    except ChannelInvalidStateError as cise:
+                        print(f"Rabbitmq Invalid State: {cise}, redialing...")
+                        self.rabbitmq_connection = await dial_rabbit_from_config(self.config)
+                        await self.establish_channel_and_queue()
+
 
     async def mark_processed(self, message: AbstractIncomingMessage):
         await self.redis_client.delete(self._get_redis_key(message))

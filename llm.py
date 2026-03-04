@@ -242,6 +242,7 @@ async def main(config):
                         redis_client=redis_client,
                         queue_name=work_queue,
                         redis_key_prefix="backup:get_topics",
+                        config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
                         try:
