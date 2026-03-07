@@ -11,7 +11,7 @@ from httpx import ConnectError
 
 import serialization
 from cached_iterator import CachedMessageIterator
-from utils import load_config, create_ssl_context, get_answer, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config
+from utils import load_config, create_ssl_context, get_answer, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config, publish_event
 from wire_formats import CleanedWhisperResult
 
 async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, solr_config: dict) -> None:
@@ -129,10 +129,23 @@ async def process_message(
     end = time.time()
     print(f"calculated similarity score in {end-start} seconds")
     
+    filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
+    sequence_number = cleaned_whisper_result.whisper_result.segment_count
+    total_segments = cleaned_whisper_result.whisper_result.total_segments
+
     if similarity_score <= 0.7:
         print("rejected")
         cleaned_whisper_result.whisper_result.tries += 1
-        if cleaned_whisper_result.whisper_result.tries < config.get("max_retries", 3):
+        tries = cleaned_whisper_result.whisper_result.tries
+        max_retries = config.get("max_retries", 3)
+        if tries < max_retries:
+            await publish_event(
+                config,
+                f"GATE_REJECTED_REQUEUE: {filename} segment {sequence_number}/{total_segments} "
+                f"rejected (similarity={similarity_score:.3f}, try {tries}/{max_retries}). "
+                f"Requeuing to {config['retry_queue']} for re-cleaning. "
+                f"This segment will be re-processed through CLEAN→GATE, adding to total processing count."
+            )
             # Dial fresh connection for publishing rejection
             async with await dial_rabbit_from_config(config) as rabbitmq_connection:
                 async with await rabbitmq_connection.channel() as channel:
@@ -143,6 +156,13 @@ async def process_message(
                         ),
                         routing_key=config["retry_queue"],
                     )
+        else:
+            await publish_event(
+                config,
+                f"GATE_REJECTED_EXHAUSTED: {filename} segment {sequence_number}/{total_segments} "
+                f"rejected (similarity={similarity_score:.3f}) and max retries ({max_retries}) exhausted. "
+                f"Segment DROPPED - will not appear in final output."
+            )
     else:
         print("accepted")
         # Dial fresh connection for publishing acceptance
@@ -190,7 +210,7 @@ async def main(config):
 
             async with connection:
                 async with await connection.channel() as channel:
-                    work_queue, retry_queue, accepted_queue = await asyncio.gather(
+                    await asyncio.gather(
                         channel.declare_queue(config["work_queue"], durable=True),
                         channel.declare_queue(config["retry_queue"], durable=True),
                         channel.declare_queue(config["accepted_queue"], durable=True,)
@@ -208,8 +228,8 @@ async def main(config):
                         config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
-                        await process_message(message, config)
-                        await queue_iter.mark_processed(message)
+                        async with queue_iter.processing(message):
+                            await process_message(message, config)
 
         except (Exception,) as conn_error:
             retry_count += 1

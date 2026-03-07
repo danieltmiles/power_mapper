@@ -56,7 +56,7 @@ flowchart TD
     LLM --> |People| People
     People --> |People + Descriptions| DBPeople[(Database<br/>People Collection)]
     Orgs --> |Extract Orgs Prompt| LLM
-    LLM --> |Orgs| ORGS
+    LLM --> |Orgs| Orgs
     Orgs --> |Organizations + Descriptions| DBOrgs[(Database<br/>Organizations Collection)]
     
     style MINT fill:#000,stroke:#fff,color:#fff

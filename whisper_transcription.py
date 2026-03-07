@@ -9,7 +9,7 @@ from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 from pamqp.commands import Basic
 
 import serialization
-from utils import load_config, create_ssl_context
+from utils import load_config, create_ssl_context, publish_event
 from wire_formats import WhisperJobDescription, WhisperResult, WhisperTimings
 
 def load_whisper_model(device):
@@ -76,12 +76,15 @@ def perform_transcription(audio_data, whisper_model, temperature=0.2, language='
     return result
 
 
-async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper_model, destination_queue):
+async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper_model, destination_queue, config: dict):
     """
     Process a transcription job message from RabbitMQ.
     """
     print(f"Received message")
     job_desc: WhisperJobDescription = serialization.load(message.body.decode())
+    filename = job_desc.transcript_metadata.filename
+    segment_count = job_desc.segment_count
+    total_segments = job_desc.total_segments
     # Convert audio data from list back to numpy array
     audio_data = np.array(job_desc.audio_segment.audio, dtype=np.float32)
 
@@ -115,6 +118,7 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper
     )
 
     # Get channel from message with error handling for invalid state
+    publish_succeeded = False
     try:
         channel = message.channel
         await channel.basic_publish(
@@ -125,17 +129,35 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper
                 delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             ),
         )
+        publish_succeeded = True
     except (ChannelInvalidStateError, ChannelClosed) as channel_error:
         print(f"Channel error while sending response: {channel_error}")
         print(f"Message will be re-queued for retry")
+        await publish_event(
+            config,
+            f"WHISPER_PUBLISH_FAILED_NACK: {filename} segment {segment_count}/{total_segments} "
+            f"publish to {destination_queue} failed ({channel_error}), nacking with requeue. "
+            f"No duplicate expected since publish did not succeed."
+        )
         # Nack the message so it gets requeued
         await message.nack(requeue=True)
         return
 
     print(f"Job completed and response sent to {destination_queue}")
 
-    # Acknowledge successful processing
-    await message.ack()
+    # Acknowledge successful processing - result was already published above
+    try:
+        await message.ack()
+    except (ChannelInvalidStateError, ChannelClosed, Exception) as ack_error:
+        # CRITICAL: Result was already published to destination_queue but ack failed.
+        # RabbitMQ will redeliver this message, causing a DUPLICATE downstream.
+        await publish_event(
+            config,
+            f"WHISPER_ACK_FAILED_AFTER_PUBLISH: {filename} segment {segment_count}/{total_segments} "
+            f"result was ALREADY PUBLISHED to {destination_queue}, but ack failed ({ack_error}). "
+            f"RabbitMQ will redeliver this message, causing DUPLICATE processing downstream."
+        )
+        raise  # let outer handler reconnect
 
 async def main(config):
     """
@@ -198,7 +220,7 @@ async def main(config):
                 async with queue.iterator() as queue_iter:
                     async for message in queue_iter:
                         try:
-                            await process_message(message, whisper_model, results_queue)
+                            await process_message(message, whisper_model, results_queue, config)
                         except (ChannelInvalidStateError, ChannelClosed) as channel_err:
                             print(f"Channel error during message processing: {channel_err}")
                             print("Will attempt to reconnect...")

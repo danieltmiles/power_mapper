@@ -215,12 +215,8 @@ async def main(config, concurrent: int = 3):
 
                 async def process_and_mark(msg, queue_iter):
                     """Process a message and mark it as processed."""
-                    try:
+                    async with queue_iter.processing(msg):
                         await process_message(msg, results_queue, config)
-                        await queue_iter.mark_processed(msg)
-                    except Exception as e:
-                        print(f"Error processing message: {e}")
-                        raise
 
                 # Start consuming messages
                 async with CachedMessageIterator(

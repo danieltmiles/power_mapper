@@ -1,6 +1,7 @@
 import hashlib
 import pickle
 from asyncio import Semaphore
+from contextlib import asynccontextmanager
 from typing import Protocol, Iterator, Any
 
 import aiormq
@@ -8,7 +9,7 @@ import redis.asyncio as redis
 from aio_pika.abc import AbstractRobustConnection, AbstractIncomingMessage, AbstractChannel
 from aiormq import ChannelInvalidStateError
 
-from utils import dial_rabbit_from_config
+from utils import dial_rabbit_from_config, publish_event
 
 
 class CachedIncomingMessage(AbstractIncomingMessage):
@@ -101,6 +102,15 @@ class CachedMessageIterator:
                     self.active_message_keys_by_body_hash[self.md5sum(message_body)] = key
                     self.cached_messages.append(message_body)
 
+            if self.config:
+                await publish_event(
+                    self.config,
+                    f"REDIS_RECOVERY: [{self.redis_key_prefix}] queue={self.queue_name} "
+                    f"replaying {len(all_keys)} messages from Redis backup. "
+                    f"These were previously acked from RabbitMQ but not marked as fully processed. "
+                    f"If downstream side-effects already occurred, this will cause duplicate processing."
+                )
+
         await self.establish_channel_and_queue()
         return self
 
@@ -138,9 +148,24 @@ class CachedMessageIterator:
                         yield message
                     except ChannelInvalidStateError as cise:
                         print(f"Rabbitmq Invalid State: {cise}, redialing...")
+                        if self.config:
+                            await publish_event(
+                                self.config,
+                                f"CHANNEL_REDIAL: [{self.redis_key_prefix}] queue={self.queue_name} "
+                                f"ChannelInvalidStateError during message consume/ack cycle: {cise}. "
+                                f"Redialing connection. The in-flight message may be redelivered by RabbitMQ "
+                                f"if it was not yet acked."
+                            )
                         self.rabbitmq_connection = await dial_rabbit_from_config(self.config)
                         await self.establish_channel_and_queue()
 
+
+    @asynccontextmanager
+    async def processing(self, message: AbstractIncomingMessage):
+        try:
+            yield message
+        finally:
+            await self.mark_processed(message)
 
     async def mark_processed(self, message: AbstractIncomingMessage):
         await self.redis_client.delete(self._get_redis_key(message))

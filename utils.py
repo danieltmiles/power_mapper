@@ -747,6 +747,35 @@ async def recover_messages_from_redis(
     print(f"Successfully recovered {recovered_count} messages from Redis")
     return recovered_count
 
+async def publish_event(config: dict, event_message: str):
+    """Publish a human-readable event message to the 'events' queue for pipeline observability.
+    
+    This is fire-and-forget instrumentation - failures to publish events
+    will never break the main processing pipeline.
+    
+    Args:
+        config: RabbitMQ connection config dict (must have host, port, username, password)
+        event_message: Human-readable description of the event
+    """
+    import datetime
+    try:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        text = f"[{timestamp}] {event_message}"
+        print(f"EVENT: {text}")
+        async with await dial_rabbit_from_config(config) as connection:
+            async with await connection.channel() as channel:
+                await channel.declare_queue("events", durable=True)
+                await channel.default_exchange.publish(
+                    aio_pika.Message(
+                        body=text.encode("utf-8"),
+                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    ),
+                    routing_key="events",
+                )
+    except Exception as e:
+        print(f"Warning: Failed to publish event '{event_message}': {e}")
+
+
 async def dial_rabbit_from_config(config: dict) -> AbstractRobustConnection:
     print(f"Creating new RabbitMQ connection to {config['host']}:{config['port']}...")
     rabbit_connection = await aio_pika.connect_robust(

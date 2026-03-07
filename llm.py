@@ -245,14 +245,8 @@ async def main(config):
                         config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
-                        try:
+                        async with queue_iter.processing(message):
                             await process_message(message, model, tokenizer, config)
-                            await queue_iter.mark_processed(message)
-                        except Exception as e:
-                            print(f"Error processing message: {e}")
-                            import traceback
-                            traceback.print_exc()
-                            # Don't mark as processed if there was an error
                             
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1

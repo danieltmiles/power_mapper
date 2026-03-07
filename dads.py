@@ -180,8 +180,8 @@ async def main(config):
                         config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
-                        await process_message(message, pipeline, destination_queue, config)
-                        await queue_iter.mark_processed(message)
+                        async with queue_iter.processing(message):
+                            await process_message(message, pipeline, destination_queue, config)
 
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1

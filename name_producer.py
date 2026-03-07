@@ -17,7 +17,7 @@ import httpx
 from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel
 
 import serialization
-from utils import load_config, create_ssl_context
+from utils import load_config, create_ssl_context, publish_event
 from wire_formats import CleanedWhisperResult, LLMPromptJob, Metaparams
 
 # sequence_number (0-indexed) and filename will uniquely identify a transcript segment
@@ -410,6 +410,13 @@ class SpeakerIdentificationProducer:
                         if "not supported between instances" not in str(type_err):
                             raise
                         print(f"duplicate sequence number for {filename}, skipping")
+                        await publish_event(
+                            self.config,
+                            f"NAME_PRODUCER_DUPLICATE_SEQUENCE: {filename} segment {sequence_number} "
+                            f"arrived at {self.config['work_queue']} queue more than once. "
+                            f"This means the same segment was published to the accepted queue multiple times "
+                            f"by an upstream service (likely GATE). This is direct evidence of duplicate processing."
+                        )
                     
                     # Now safe to acknowledge - message is backed up in Redis
                     await message.ack()

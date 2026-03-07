@@ -185,8 +185,8 @@ async def main(config):
                         config=config,
                 ) as queue_iter:
                     async for message in queue_iter:
-                        await process_message(message, tokenizer, result_queue, config)
-                        await queue_iter.mark_processed(message)
+                        async with queue_iter.processing(message):
+                            await process_message(message, tokenizer, result_queue, config)
 
         except (Exception,) as conn_error:
             retry_count += 1

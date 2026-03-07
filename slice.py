@@ -383,9 +383,9 @@ class AssembleDiarizationService:
                             config=self.config,
                     ) as queue_iter:
                         async for message in queue_iter:
-                            diarization_result: DiarizationResponse = serialization.load(message.body.decode())
-                            await self.process_diarization_result(diarization_result, channel)
-                            await queue_iter.mark_processed(message)
+                            async with queue_iter.processing(message):
+                                diarization_result: DiarizationResponse = serialization.load(message.body.decode())
+                                await self.process_diarization_result(diarization_result, channel)
             except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError, Exception) as conn_error:
                 try:
                     # re-dial
