@@ -1,0 +1,29 @@
+# Cline Style Guide for power_mapper
+
+## Python Testing Style
+
+- Do not create pytest fixtures for things that can be expressed in fewer than three lines. Inline them directly in the test function instead.
+- Do not create factory fixtures (fixtures that return factory functions). Construct objects directly in each test.
+- Abstractions (fixtures, helpers, factory functions) are only justified if their body contains three or more meaningful lines of logic.
+- Use full, descriptive variable names throughout. Never abbreviate:
+  - `callback` not `cb`
+  - `sliding_window` not `sw`
+  - `async_callback` not `async_cb`
+  - `segment` not `seg` (unless used in a very tight loop where it is obvious)
+- Spell things out as a human would read them. Code is read far more often than it is written.
+
+## General Python Style
+
+- Prefer clarity over cleverness.
+- Avoid unnecessary layers of indirection. If a helper only saves one line at the call site, it is not worth having.
+- Variable and function names should communicate intent without requiring a reader to look up the definition.
+
+## Prefer Simplex Over Complex Structure
+
+These guidelines use "complex" in the strict sense: things that are *twisted together*, where multiple concerns are intertwined. "Simplex" means concerns run in parallel and can be understood independently.
+
+- **Prefer plain data + standalone functions** over classes that bundle data and logic together. A module-level function that takes a dataclass as an argument is simpler than a method that operates on `self`.
+- **Prefer pure functions** (output depends only on input, no side effects) over methods that read or mutate object state.
+- **Introduce a class when it pays for itself.** Bundling data and behavior into a class is justified when it makes the code *genuinely easier to understand or reason about* — not simply because it is a familiar pattern. The question to ask is: does naming this concept as an object clarify the design, or does it just add a layer?
+- **Stateful objects carry the highest burden.** A class that combines mutable state, data, and logic is the most complex structure available. Use it only when explicit state management (e.g., passing state as arguments) would be harder to follow than encapsulating it.
+- When in doubt, start with a function. Promote to a class only when the function's argument list becomes unwieldy *and* the arguments naturally belong together as a named concept.
