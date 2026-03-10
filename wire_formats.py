@@ -36,18 +36,23 @@ class LLMPromptJob(Dictable):
     job_id: str
     filename: str
     reply_to: str
-    prompt: str
+    prompt: str | list[dict]
     request_id: str | None = None
     meta_params: Metaparams = field(default_factory=Metaparams)
+    state: dict[str, Any] | None = None
+
+    encourage_thinking: bool = True
 
     def __init__(
         self,
         job_id: str,
         filename: str,
         reply_to: str,
-        prompt: str,
+        prompt: str | list[dict],
         request_id: str | None = None,
-        meta_params: Metaparams | dict[str, Any] | None = None
+        meta_params: Metaparams | dict[str, Any] | None = None,
+        state: dict[str, Any] | None = None,
+        encourage_thinking: bool = True,
     ):
         self.job_id = job_id
         self.filename = filename
@@ -63,6 +68,8 @@ class LLMPromptJob(Dictable):
                 raise ValueError("meta_params must be a Metaparams instance or a dict")
         else:
             self.meta_params = Metaparams()
+        self.state = state
+        self.encourage_thinking = encourage_thinking
 
 
 
@@ -73,7 +80,9 @@ class LLMPromptJob(Dictable):
             "reply_to": self.reply_to,
             "request_id": self.request_id,
             "prompt": self.prompt,
-            "meta_params": self.meta_params.asdict() if self.meta_params else None
+            "meta_params": self.meta_params.asdict() if self.meta_params else None,
+            "state": self.state,
+            "encourage_thinking": self.encourage_thinking,
         }
 
 @dataclass
@@ -89,6 +98,8 @@ class LLMPromptResponse(LLMPromptJob):
             prompt=job.prompt,
             request_id=job.request_id,
             meta_params=job.meta_params,
+            state=job.state,
+            encourage_thinking=job.encourage_thinking,
             generated_text=generated_text
         )
     def asdict(self) -> dict[str, Any]:

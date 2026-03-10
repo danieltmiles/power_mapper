@@ -1,7 +1,6 @@
 """
 Speaker Identification producer for RabbitMQ
 """
-import heapq
 import uuid
 from asyncio import Semaphore
 from collections import defaultdict
@@ -11,23 +10,13 @@ import aio_pika
 import argparse
 import asyncio
 import redis.asyncio as redis
-import ssl as ssl_module
 
-import httpx
 from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel
 
 import serialization
+from sliding_window import SlidingWindow
 from utils import load_config, create_ssl_context, publish_event
 from wire_formats import CleanedWhisperResult, LLMPromptJob, Metaparams
-
-# sequence_number (0-indexed) and filename will uniquely identify a transcript segment
-# The context window that will fit on the RTX3090 is 10240 tokens. Since a rough estimate is
-# 1 token ~= 4 characters and we want to leave room for the LLM's output, lets limit our
-# prompt length to half the context, 5120 tokens, * 4 characters/token = 20480 characters.
-# Since the prompt template is 1694 characters, that leaves us with about 18786 characters for
-# the transcript window. Call it 18000 for a safety factor. So, we need an in-order sliding
-# window of transcript segments from these messages which contain one segment each and may
-# come out of order.
 
 MAX_PROMPT_TRANSCRIPT_LENGTH = 10000
 PROMPT_TEMPLATE = """The following is an excerpt from an automatically transcribed meeting:
@@ -76,36 +65,12 @@ JSON_OUTPUT_START
 JSON_OUTPUT_END
 """
 
-def form_transcript_chunk(cleaned_result: CleanedWhisperResult) -> str:
-    # segments can be assembled like this:
-    # [{start_seconds}-{end_seconds}] {speaker}:\n{cleaned_transcript}
-    speaker = cleaned_result.whisper_result.speaker
-    start_seconds = cleaned_result.whisper_result.timings.start
-    end_seconds = cleaned_result.whisper_result.timings.end
-    return f"[{start_seconds:.2f}-{end_seconds:.2f}] {speaker.strip()}:\n{cleaned_result.cleaned_transcript.strip()}\n\n"
-
-def safe_heappop(heap: list) -> Any:
-    try:
-        return heapq.heappop(heap)
-    except IndexError:
-        return None
-
-def safe_heappeek(heap: list) -> Any:
-    resp = safe_heappop(heap)
-    if resp is not None:
-        heapq.heappush(heap, resp)
-    return resp
 
 class SpeakerIdentificationProducer:
     def __init__(self, config: dict[str, Any]):
         self.config = config
         self.ssl_context = create_ssl_context()
-        # collected_transcript_sections[filename] is a min-heap of CleanedWhisperResult objects
-        # ordered by whisper_result.segment_count (lowest segment_count at index 0)
-        # Each item in the heap is a tuple: (segment_count, CleanedWhisperResult)
-        self.collected_transcript_sections = defaultdict(list)
-        self.filename_sequence_number_indexes = defaultdict(lambda: -1)
-        self.whisper_results_by_filename = defaultdict(list)
+        self.sliding_windows_by_filename: dict[str, SlidingWindow] = {}
         self.redis_client = None
         self.redis_semaphore = Semaphore(10)
 
@@ -131,8 +96,8 @@ class SpeakerIdentificationProducer:
         if self.redis_client is None:
             return
 
-        # Use a Redis key pattern: backup:{filename}:{sequence_number}
-        key = f"backup:{filename}:{sequence_number}"
+        # Use a Redis key pattern: nameproducerbackup:{filename}:{sequence_number}
+        key = f"nameproducerbackup:{filename}:{sequence_number}"
         async with self.redis_semaphore:
             await self.redis_client.set(key, message_body)
 
@@ -141,7 +106,7 @@ class SpeakerIdentificationProducer:
         if self.redis_client is None:
             return
         
-        key = f"backup:{filename}:{sequence_number}"
+        key = f"nameproducerbackup:{filename}:{sequence_number}"
         async with self.redis_semaphore:
             await self.redis_client.delete(key)
 
@@ -151,7 +116,7 @@ class SpeakerIdentificationProducer:
             return
         
         # Find all keys matching the pattern
-        pattern = f"backup:{filename}:*"
+        pattern = f"nameproducerbackup:{filename}:*"
         cursor = 0
         while True:
             async with self.redis_semaphore:
@@ -162,85 +127,36 @@ class SpeakerIdentificationProducer:
                     break
         print(f"Cleaned up Redis backups for {filename}")
 
-    async def _recover_from_redis(self):
-        """Recover messages from Redis after a crash or restart."""
-        if self.redis_client is None:
-            print("No Redis connection - skipping recovery")
-            return
-        
-        print("Checking Redis for backed up messages...")
-        pattern = "backup:*"
-        cursor = 0
-        recovered_count = 0
-        
-        # Collect all backup keys
-        all_keys = []
-        while True:
-            async with self.redis_semaphore:
-                cursor, keys = await self.redis_client.scan(cursor, match=pattern, count=100)
-                all_keys.extend(keys)
-                if cursor == 0:
-                    break
-        
-        if not all_keys:
-            print("No backed up messages found in Redis")
-            return
-        
-        print(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
-        
-        # Process each backed up message
-        for key in all_keys:
-            try:
-                # Get the message body from Redis
-                async with self.redis_semaphore:
-                    message_body = await self.redis_client.get(key)
-                
-                if message_body is None:
-                    continue
-                
-                # Deserialize the message
-                cleaned_whisper_result: CleanedWhisperResult = serialization.load(message_body.decode())
-                filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
-                sequence_number = cleaned_whisper_result.whisper_result.segment_count
-                
-                # Add to collected_transcript_sections heap
-                heapq.heappush(
-                    self.collected_transcript_sections[filename],
-                    (sequence_number, cleaned_whisper_result),
-                )
-                
-                recovered_count += 1
-                
-            except Exception as e:
-                print(f"Error recovering message from key {key}: {e}")
-                continue
-        
-        print(f"Successfully recovered {recovered_count} messages from Redis")
-        
-        # Now populate whisper_results_by_filename by processing sequences
-        for filename in self.collected_transcript_sections:
-            # Sort the heap to get items in sequence order
-            heap_copy = sorted(self.collected_transcript_sections[filename], key=lambda x: x[0])
-            
-            # Process messages in sequence to populate whisper_results_by_filename
-            for sequence_number, cleaned_whisper_result in heap_copy:
-                # Only add consecutive sequences to whisper_results_by_filename
-                if sequence_number == self.filename_sequence_number_indexes[filename] + 1:
-                    self.whisper_results_by_filename[filename].append(cleaned_whisper_result)
-                    self.filename_sequence_number_indexes[filename] = sequence_number
-                else:
-                    # Stop at the first gap in sequence
-                    break
-            
-            if self.whisper_results_by_filename[filename]:
-                print(f"Restored {len(self.whisper_results_by_filename[filename])} sequential messages for {filename}")
+    def _make_sliding_window_for(self, filename: str, channel: AbstractRobustChannel) -> SlidingWindow:
+        """Create a SlidingWindow whose callback publishes an LLM prompt job for filename."""
+        async def callback(prompt_text: str):
+            sliding_window = self.sliding_windows_by_filename[filename]
+            last_item = sliding_window.window[-1]
+            sequence_number = last_item.sequence_number
+            total_segments = last_item.sequence_count
+            sequence_numbers = [item.sequence_number for item in sliding_window.window]
+
+            last_number = sequence_numbers[0]
+            for num in sequence_numbers[1:]:
+                if num != last_number + 1:
+                    print(f"non-monotonic number, {num} follows {last_number}")
+                last_number = num
+            print(f"sending prompt with texts from sequence numbers: {sequence_numbers[0]}-{sequence_numbers[-1]}")
+
+            remove_coros = [self._remove_message_from_redis(filename, seq) for seq in sequence_numbers]
+            await asyncio.gather(*remove_coros, self.send(channel, filename, sequence_number, total_segments, prompt_text))
+
+            if sequence_number == total_segments - 1:
+                await self._cleanup_filename_backups(filename)
+
+        return SlidingWindow(MAX_PROMPT_TRANSCRIPT_LENGTH, callback, truncation_percentage=0.3)
 
     async def send(
         self,
         channel: AbstractRobustChannel,
         filename: str,
         sequence_number: int,
-        cached_whisper_result: CleanedWhisperResult,
+        total_segments: int,
         transcript_text: str,
     ):
         job_desc = LLMPromptJob(
@@ -255,6 +171,10 @@ class SpeakerIdentificationProducer:
                 repetition_penalty=1.1,
                 stop=["JSON_OUTPUT_END"]
             ),
+            state={
+                "sequence_number": sequence_number,  # sequence number is highest in block
+                "num_sequences": total_segments,
+            },
         )
         await channel.default_exchange.publish(
             aio_pika.Message(
@@ -263,113 +183,62 @@ class SpeakerIdentificationProducer:
             ),
             routing_key=self.config["destination_queue"]
         )
-        # sliding window:
-        # lop off the oldest 30% of the prompts_by_filename[filename]
-        # BUT only if we're not at the end of the file
-        if sequence_number != cached_whisper_result.whisper_result.total_segments - 1:
-            num_sections = len(self.whisper_results_by_filename[filename])
-            if num_sections > 2:
-                to_lop = int(num_sections * .3)
-                self.whisper_results_by_filename[filename] = self.whisper_results_by_filename[filename][to_lop:]
-            # Keep the window intact even if num_sections <= 2 for continuity
-        else:
-            # Clear only when we're done with the entire file
-            self.whisper_results_by_filename[filename] = []
 
-#     async def fetch_from_solr_by_filename(self, filename) -> list[CleanedWhisperResult]:
-#         whisper_results: list[CleanedWhisperResult] = []
-#         auth = httpx.BasicAuth(username=self.config["solr"]["username"], password=self.config["solr"]["password"])
-#         collection = "transcripts"
-#         base_uri = f"{self.config['solr']['url']}/{collection}"
-#         params = {
-#             "q": "*:*",
-#             "fq": f"filename:\"{filename}\"",
-#             "rows": 100,
-#             "sort": "sequence_number asc",
-#             "start": 0,
-#         }
-#         async with httpx.AsyncClient(auth=auth, timeout=10) as client:
-#             raw_resp = await client.get(
-#                 f"{base_uri}/select",
-#                 params=params,
-#             )
-#             raw_resp.raise_for_status()
-#             resp = raw_resp.json()
-#             num_found = resp.get("response", {}).get("numFound")
-#             num_gotten = 0
-#             while num_gotten < num_found:
-#                 for document in resp.get("response", {}).get("docs", []):
-#                     cleaned_whisper_result: CleanedWhisperResult = serialization.load(document["cleaned_whisper_result"])
-#                     whisper_results.append(cleaned_whisper_result)
-#                     num_gotten += 1
-#                 params["start"] = num_gotten
-#                 if num_gotten >= num_found:
-#                     continue  # loop will exit, don't do another HTTP call
-#                 raw_resp = await client.get(
-#                     f"{base_uri}/select",
-#                     params=params,
-#                 )
-#                 raw_resp.raise_for_status()
-#                 resp = raw_resp.json()
-#         return whisper_results
-#
-    async def clear_and_send(self, filename: str, channel: AbstractRobustChannel):
-        collected_transcript_sections_heap = self.collected_transcript_sections[filename]
-        popped = safe_heappop(collected_transcript_sections_heap)
-        if popped is None:
+    async def _recover_from_redis(self, channel: AbstractRobustChannel):
+        """Recover messages from Redis after a crash or restart."""
+        if self.redis_client is None:
+            print("No Redis connection - skipping recovery")
             return
-        sequence_number: int = popped[0]
-        cached_whisper_result: CleanedWhisperResult = popped[1]
-        is_last_segment = False
-        while sequence_number == self.filename_sequence_number_indexes[filename] + 1:
-            self.whisper_results_by_filename[filename].append(cached_whisper_result)
-            self.filename_sequence_number_indexes[filename] = sequence_number
-            # Remove this message from Redis backup as it's been processed
-            await self._remove_message_from_redis(filename, sequence_number)
-            
-            prompt_text = "".join(form_transcript_chunk(r) for r in self.whisper_results_by_filename[filename])
-            if sequence_number == cached_whisper_result.whisper_result.total_segments - 1 or \
-                    len(prompt_text) > MAX_PROMPT_TRANSCRIPT_LENGTH:
-                sequence_numbers = [x.whisper_result.segment_count for x in self.whisper_results_by_filename[filename]]
-                last_number = sequence_numbers[0]
-                for num in sequence_numbers[1:]:
-                    if num != last_number + 1:
-                        print(f"non-monotonic number, {num} follows {last_number}")
-                    last_number = num
-                print(f"sending prompt with texts from sequence numbers: {sequence_numbers[0]}-{sequence_numbers[-1]}")
-                coros = [self._remove_message_from_redis(filename, x) for x in sequence_numbers]
-                coros.append(self.send(channel, filename, sequence_number, cached_whisper_result, prompt_text))
-                await asyncio.gather(*coros)
-                
-                # Check if this is the last segment of the file
-                if sequence_number == cached_whisper_result.whisper_result.total_segments - 1:
-                    is_last_segment = True
-
-            popped = safe_heappop(collected_transcript_sections_heap)
-            if popped is None:
-                break
-            sequence_number: int = popped[0]
-            cached_whisper_result: CleanedWhisperResult = popped[1]
-        else:
-            # repair when we couldn't use a sequence number
-            if popped:
-                heapq.heappush(
-                    self.collected_transcript_sections[filename],
-                    (sequence_number, cached_whisper_result),
-                )
         
-        # If we finished processing the last segment, cleanup all backups for this filename
-        if is_last_segment:
-            await self._cleanup_filename_backups(filename)
+        print("Checking Redis for backed up messages...")
+        pattern = "nameproducerbackup:*"
+        cursor = 0
 
+        all_keys = []
+        while True:
+            async with self.redis_semaphore:
+                cursor, keys = await self.redis_client.scan(cursor, match=pattern, count=100)
+                all_keys.extend(keys)
+                if cursor == 0:
+                    break
+        
+        if not all_keys:
+            print("No backed up messages found in Redis")
+            return
+        
+        print(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
+
+        recovered_by_filename: dict[str, list[CleanedWhisperResult]] = defaultdict(list)
+        for key in all_keys:
+            try:
+                async with self.redis_semaphore:
+                    message_body = await self.redis_client.get(key)
+                if message_body is None:
+                    continue
+                cleaned_whisper_result: CleanedWhisperResult = serialization.load(message_body.decode())
+                filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
+                recovered_by_filename[filename].append(cleaned_whisper_result)
+            except Exception as e:
+                print(f"Error recovering message from key {key}: {e}")
+
+        recovered_count = 0
+        for filename, results in recovered_by_filename.items():
+            if filename not in self.sliding_windows_by_filename:
+                self.sliding_windows_by_filename[filename] = self._make_sliding_window_for(filename, channel)
+            sliding_window = self.sliding_windows_by_filename[filename]
+            for cleaned_whisper_result in sorted(results, key=lambda r: r.whisper_result.segment_count):
+                await sliding_window.append(cleaned_whisper_result)
+                recovered_count += 1
+
+        print(f"Successfully recovered {recovered_count} messages from Redis")
 
     async def run(self):
-        # Connect to Redis for message backup
+        """
+        Main loop: connect to Redis, then RabbitMQ, recover any backed-up messages,
+        then process incoming speaker-identification jobs.
+        """
         await self._connect_redis()
-        
-        # Recover any messages from Redis after a crash/restart
-        await self._recover_from_redis()
-        
+
         connection: AbstractRobustConnection = await aio_pika.connect_robust(
             host=self.config['host'],
             port=self.config['port'],
@@ -381,6 +250,11 @@ class SpeakerIdentificationProducer:
         async with connection:
             channel = await connection.channel()
             await channel.set_qos(prefetch_count=1)
+
+            # Recovery runs after the channel is ready so that SlidingWindow
+            # callbacks can publish LLM jobs for any unfinished work from a
+            # previous session.
+            await self._recover_from_redis(channel)
 
             work_queue = self.config['work_queue']
             queue, _ = await asyncio.gather(
@@ -396,16 +270,14 @@ class SpeakerIdentificationProducer:
                     cleaned_whisper_result: CleanedWhisperResult = serialization.load(message.body.decode())
                     filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
                     sequence_number = cleaned_whisper_result.whisper_result.segment_count
-                    
+
                     # Backup message to Redis BEFORE acknowledging or processing
                     await self._backup_message_to_redis(filename, sequence_number, message.body)
-                    
+
                     try:
-                        heapq.heappush(
-                            self.collected_transcript_sections[filename],
-                            (sequence_number, cleaned_whisper_result),
-                        )
-                        await self.clear_and_send(filename, channel)
+                        if filename not in self.sliding_windows_by_filename:
+                            self.sliding_windows_by_filename[filename] = self._make_sliding_window_for(filename, channel)
+                        await self.sliding_windows_by_filename[filename].append(cleaned_whisper_result)
                     except TypeError as type_err:
                         if "not supported between instances" not in str(type_err):
                             raise
@@ -417,9 +289,10 @@ class SpeakerIdentificationProducer:
                             f"This means the same segment was published to the accepted queue multiple times "
                             f"by an upstream service (likely GATE). This is direct evidence of duplicate processing."
                         )
-                    
+
                     # Now safe to acknowledge - message is backed up in Redis
                     await message.ack()
+
 
 async def main(config):
     """

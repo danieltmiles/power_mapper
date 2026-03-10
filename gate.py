@@ -168,14 +168,8 @@ async def process_message(
         # Dial fresh connection for publishing acceptance
         async with await dial_rabbit_from_config(config) as rabbitmq_connection:
             async with await rabbitmq_connection.channel() as channel:
-                accepted_exchange = await channel.declare_exchange(
-                    config["accepted_queue"],
-                    aio_pika.ExchangeType.TOPIC,
-                    durable=True,
-                    arguments={"alternate-exchange": f"{config['accepted_queue']}.unrouted"}
-                )
                 await asyncio.gather(
-                    accepted_exchange.publish(
+                    channel.default_exchange.publish(
                         aio_pika.Message(body=message.body),
                         routing_key=config["accepted_queue"]
                     ),

@@ -108,6 +108,33 @@ def generate_text(prompt: str, model, tokenizer, params: dict) -> str:
     return generated_text
 
 
+def find_begin_thinking_token(tokenizer) -> str | None:
+    """
+    Search the tokenizer's special tokens for an opening thinking token (e.g. <think>).
+    Returns the token string if found, or None if this model has no thinking token.
+
+    The heuristic: look for a special token whose text contains "think" but does NOT
+    look like a closing tag (i.e. does not contain "/" or "end" right before/after "think").
+    """
+    for token in getattr(tokenizer, "additional_special_tokens", []):
+        lowered = token.lower()
+        if "think" in lowered and "/think" not in lowered and "end_think" not in lowered:
+            return token
+    return None
+
+
+def find_end_thinking_token(tokenizer) -> str | None:
+    """
+    Search the tokenizer's special tokens for a closing thinking token (e.g. </think>).
+    Returns the token string if found, or None if this model has no thinking token.
+    """
+    for token in getattr(tokenizer, "additional_special_tokens", []):
+        lowered = token.lower()
+        if "/think" in lowered or "end_think" in lowered:
+            return token
+    return None
+
+
 async def process_message(message: AbstractIncomingMessage, model, tokenizer, config: dict):
     """
     Process an LLM generation job message from RabbitMQ.
@@ -155,16 +182,35 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
             job_desc.meta_params = Metaparams(**params_kwargs)
     
     print(f"Received job {job_desc.job_id}, request {job_desc.request_id}")
-    print(f"Prompt length: {len(job_desc.prompt)} chars")
+
+    if isinstance(job_desc.prompt, list):
+        print(f"Prompt is a conversation with {len(job_desc.prompt)} messages")
+        text_prompt = tokenizer.apply_chat_template(
+            job_desc.prompt,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        begin_thinking_token = find_begin_thinking_token(tokenizer)
+        if begin_thinking_token:
+            if job_desc.encourage_thinking:
+                print(f"Encouraging thinking: appending {begin_thinking_token!r}")
+                text_prompt += begin_thinking_token + "\n"
+            else:
+                end_thinking_token = find_end_thinking_token(tokenizer)
+                print(f"Suppressing thinking: appending {begin_thinking_token!r}{end_thinking_token!r}")
+                text_prompt += begin_thinking_token + (end_thinking_token or "") + "\n"
+    else:
+        print(f"Prompt length: {len(job_desc.prompt)} chars")
+        text_prompt = job_desc.prompt
 
     # Run text generation in thread pool to prevent blocking
-    print(f"<prompt>\n{job_desc.prompt}\n</prompt>")
+    print(f"<prompt>\n{text_prompt}\n</prompt>")
     loop = asyncio.get_event_loop()
     start = time.time()
     generated_text = await loop.run_in_executor(
         None,
         generate_text,
-        job_desc.prompt,
+        text_prompt,
         model,
         tokenizer,
         job_desc.meta_params.asdict(),

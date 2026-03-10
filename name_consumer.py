@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import httpx
 
-from aio_pika.abc import AbstractIncomingMessage
+from aio_pika.abc import AbstractIncomingMessage, AbstractExchange
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 
 import serialization
@@ -65,6 +65,11 @@ async def process_message(message: AbstractIncomingMessage, config: dict):
     response: wire_formats.LLMPromptResponse = serialization.load(message.body.decode())
     filename = response.filename
     generated_text = response.generated_text
+    sequence_number: int | None = None
+    num_sequences: int | None = None
+    if response.state:
+        sequence_number = response.state.get("sequence_number", None)
+        num_sequences = response.state.get("num_sequences", None)
 
     print(f"Received identification response for file: {filename}")
 
@@ -85,6 +90,15 @@ async def process_message(message: AbstractIncomingMessage, config: dict):
 
     await update_speakers(filename, new_speakers, config)
     print(f"Successfully updated speakers for {filename}")
+    if sequence_number is not None and num_sequences is not None and sequence_number == num_sequences - 1:
+        # last one
+        async with dial_rabbit_from_config(config) as connection:
+            async with await connection.channel() as channel:
+                exchange: AbstractExchange = await channel.get_exchange(config["file_done_exchange"])
+                await exchange.publish(
+                    aio_pika.Message(filename.encode("utf-8")),
+                    routing_key=config["file_done_exchange"],
+                )
 
 
 async def main(config):
@@ -112,17 +126,31 @@ async def main(config):
 
             async with connection:
                 async with await connection.channel() as channel:
-                    work_queue = config['work_queue']
-                    await channel.declare_queue(work_queue, durable=True)
+                    alt_exchange, topic_exchange, unrouted_queue, work_queue = await asyncio.gather(
+                        channel.declare_exchange(
+                            name=f"{config['file_done_exchange']}.unrouted",
+                            type=aio_pika.ExchangeType.FANOUT,
+                            durable=True,
+                        ),
+                        channel.declare_exchange(
+                            name=config["file_done_exchange"],
+                            type=aio_pika.ExchangeType.TOPIC,
+                            durable=True,
+                            arguments = {"alternate-exchange": f"{config['file_done_exchange']}.unrouted"},
+                        ),
+                        channel.declare_queue("file_done_unrouted_messages", durable=True),
+                        channel.declare_queue(config["work_queue"], durable=True),
+                    )
+                    await unrouted_queue.bind(alt_exchange)
 
-                print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
+                print(f"Successfully connected! Listening for jobs on queue: {work_queue.name}")
                 print("Waiting for messages. To exit press CTRL+C")
 
                 # Start consuming messages
                 async with CachedMessageIterator(
                         rabbitmq_connection=connection,
                         redis_client=redis_client,
-                        queue_name=work_queue,
+                        queue_name=work_queue.name,
                         redis_key_prefix="backup:name",
                         config=config,
                 ) as queue_iter:
