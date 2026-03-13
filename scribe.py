@@ -1,223 +1,115 @@
 # SCRIBE - Summary Construction and Report Integration from Brief Extracts
-# Consumes LLM responses produced by trac_consumer.py and extracts structured
-# issue summaries (issue_title + description) from the generated JSON, then
-# vectorizes and persists them to the Solr 'topics' core.
-
 import asyncio
 import argparse
-import json
-
-import httpx
-from aiormq import AMQPError, ChannelInvalidStateError, ChannelClosed
-from httpx import ConnectError
-from sentence_transformers import SentenceTransformer
+import aio_pika
+from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 
 import serialization
 from logger import get_logger
+from relationship_parser import RelationshipParser
 from utils import load_config, dial_rabbit_from_config, get_answer
-from wire_formats import LLMPromptResponse
+from wire_formats import LLMPromptResponse, LLMPromptJob
 
-logger = get_logger("scribe")
-
-SOLR_CORE = "topics"
-VECTOR_DIMENSION = 384  # all-MiniLM-L6-v2 output size
+logger = get_logger("trac_consumer")
 
 
-def extract_issue_summary(generated_text: str) -> dict | None:
-    """
-    Extract issue_title and description from the LLM's generated text.
-
-    Expects the LLM to have responded with a ```json block containing at
-    minimum 'issue_title' and 'description' keys, as requested by trac_consumer.py.
-
-    Returns a dict with those keys, or None if extraction fails.
-    """
-    raw_json = get_answer(generated_text, "```json", "```")
-    if not raw_json:
-        logger.info("no ```json block found in generated text")
-        return None
-    try:
-        parsed = json.loads(raw_json)
-    except json.JSONDecodeError as json_error:
-        logger.info(f"failed to parse extracted JSON: {json_error}")
-        logger.info(f"Raw extracted text: {raw_json!r}")
-        return None
-
-    issue_title = parsed.get("issue_title")
-    description = parsed.get("description")
-
-    if not issue_title:
-        logger.info("issue_title missing from extracted JSON")
-        return None
-
-    return {"issue_title": issue_title, "description": description}
-
-
-async def ensure_solr_core(solr_config: dict) -> None:
-    """
-    Create the 'topics' core if it does not already exist, then ensure the
-    schema contains all required fields including the dense vector field.
-    """
-    base_url = solr_config["url"].rstrip("/")
-    auth = httpx.BasicAuth(solr_config["username"], solr_config["password"])
-
-    async with httpx.AsyncClient(auth=auth, timeout=30) as client:
-        schema_url = f"{base_url}/{SOLR_CORE}/schema"
-
-        # Ensure the dense vector field type exists
-        field_types_response = await client.get(f"{schema_url}/fieldtypes")
-        field_types_response.raise_for_status()
-        existing_type_names = {ft["name"] for ft in field_types_response.json().get("fieldTypes", [])}
-        vector_field_type_name = f"knn_vector_{VECTOR_DIMENSION}"
-
-        if vector_field_type_name not in existing_type_names:
-            logger.info(f"Adding field type '{vector_field_type_name}'...")
-            type_response = await client.post(
-                schema_url,
-                json={
-                    "add-field-type": {
-                        "name": vector_field_type_name,
-                        "class": "solr.DenseVectorField",
-                        "vectorDimension": VECTOR_DIMENSION,
-                        "similarityFunction": "cosine",
-                    }
-                },
-            )
-            type_response.raise_for_status()
-            logger.info(f"Field type '{vector_field_type_name}' added")
-        else:
-            logger.info(f"Field type '{vector_field_type_name}' already exists")
-
-        # Ensure document fields exist
-        fields_to_add = [
-            {"name": "title",           "type": "text_general",        "stored": True, "indexed": True,  "multiValued": False},
-            {"name": "description",     "type": "text_general",        "stored": True, "indexed": True,  "multiValued": False},
-            {"name": "source_filename", "type": "string",              "stored": True, "indexed": True,  "multiValued": False},
-            {"name": "vector",          "type": vector_field_type_name, "stored": True, "indexed": True, "multiValued": False},
-        ]
-
-        existing_fields_response = await client.get(f"{schema_url}/fields")
-        existing_fields_response.raise_for_status()
-        existing_field_names = {field["name"] for field in existing_fields_response.json().get("fields", [])}
-
-        fields_added = 0
-        for field in fields_to_add:
-            if field["name"] not in existing_field_names:
-                add_response = await client.post(schema_url, json={"add-field": field})
-                add_response.raise_for_status()
-                logger.info(f"Added field: {field['name']} ({field['type']})")
-                fields_added += 1
-            else:
-                logger.info(f"Field already exists: {field['name']}")
-
-        if fields_added > 0:
-            logger.info(f"Successfully added {fields_added} new fields to schema")
-        else:
-            logger.info("Schema is up to date - all required fields exist")
-
-
-async def publish_topic_to_solr(
-    issue_summary: dict,
-    source_filename: str,
-    model: SentenceTransformer,
-    solr_config: dict,
-) -> None:
-    text = issue_summary["description"]
-    vector = model.encode(text).tolist()
-
-    document = {
-        "title": issue_summary["issue_title"],
-        "description": issue_summary["description"],
-        "source_filename": source_filename,
-        "vector": vector,
-    }
-
-    base_url = solr_config["url"].rstrip("/")
-    auth = httpx.BasicAuth(solr_config["username"], solr_config["password"])
-    update_url = f"{base_url}/{SOLR_CORE}/update"
-
-    async with httpx.AsyncClient(auth=auth, timeout=90) as client:
-        tries = 0
-        while True:
-            try:
-                response = await client.post(update_url, json=[document], params={"commit": "true"})
-                break
-            except ConnectError:
-                tries += 1
-                if tries > 5:
-                    logger.error("Too many errors talking to Solr, giving up")
-                    raise
-                logger.error(f"ConnectError posting to Solr, retrying in {5 * tries}s...")
-                await asyncio.sleep(5 * tries)
-
-        response.raise_for_status()
-        logger.info(f"Published topic '{issue_summary['issue_title']}' to Solr")
-
-
-async def process_message(message, model: SentenceTransformer, config: dict) -> None:
+async def process_message(message, llm_channel, config):
     try:
         prompt_response: LLMPromptResponse = serialization.load(message.body.decode())
-        issue_summary = extract_issue_summary(prompt_response.generated_text)
-        if issue_summary:
-            await publish_topic_to_solr(issue_summary, prompt_response.filename, model, config["solr"])
-        else:
-            logger.info("Could not extract issue summary from response")
+        answer = get_answer(prompt_response.generated_text, "```graph", "```")
+        relationships = RelationshipParser().parse_multiple(answer)
+        issues = list(set(x.issue for x in relationships))
+        for issue in issues:
+            new_prompt_job = LLMPromptJob(
+                job_id=prompt_response.job_id,
+                filename=prompt_response.filename,
+                reply_to=config["reply_to"],
+                prompt=[
+                    prompt_response.prompt[0],
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Another analyst identified an issue, `{issue}` from the given transcript section. "
+                            "Using the provided transcript section please create as complete a description of the "
+                            "issue as you can. If you cannot infer any additional details, simply use the given issue "
+                            "text as the full description. Format your your response like so:\n```json\n{"
+                            "\n    \"issue_title\": \"given issue title\",\n    \"description\": \"full description "
+                            "posibly with multiple lines\"\n}\n```\n"
+                        )
+                    }
+                ],
+                request_id=prompt_response.request_id,
+                state=prompt_response.state,
+            )
+            await llm_channel.default_exchange.publish(
+                aio_pika.Message(
+                    body=serialization.dumps(new_prompt_job).encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                ),
+                routing_key="llm/qwen32",
+            )
 
-    except Exception as error:
-        logger.error(f"Error processing message: {error}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
     finally:
         await message.ack()
 
 
-async def main(config: dict) -> None:
-    logger.info("Initializing SCRIBE service...")
-
-    logger.info("Loading sentence transformer model...")
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    logger.info("Model loaded")
-
-    await ensure_solr_core(config["solr"])
-
+async def main(config):
+    """
+    Main function to start the RabbitMQ consumer with reconnection logic.
+    
+    Handles connection failures and automatically reconnects with exponential backoff.
+    """
+    print("Initializing TRAC consumer...")
+    
+    # Retry configuration
     max_retries = 10
-    base_retry_delay = 2   # seconds
-    max_retry_delay = 60   # seconds
+    base_retry_delay = 2  # seconds
+    max_retry_delay = 60  # seconds
+    
     retry_count = 0
 
     while True:
         try:
             logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
-            connection = await dial_rabbit_from_config(config)
+
             retry_count = 0
+
+            llm_connection = await dial_rabbit_from_config(config)
+            llm_channel = await llm_connection.channel()
+            await llm_channel.declare_queue("llm/qwen32", durable=True)
+
+            connection = await dial_rabbit_from_config(config)
 
             async with connection:
                 async with await connection.channel() as channel:
                     await channel.set_qos(prefetch_count=1)
                     queue = await channel.declare_queue(config["work_queue"], durable=True)
 
-                    logger.info(f"Listening for issue summaries on queue: {queue.name}")
+                    logger.info(f"Successfully connected! Listening for jobs on queue: {queue.name}")
                     logger.info("Waiting for messages. To exit press CTRL+C")
 
                     async with queue.iterator() as queue_iter:
                         async for message in queue_iter:
-                            await process_message(message, model, config)
-
-        except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as connection_error:
+                            await process_message(message, llm_channel, config)
+                        
+        except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
                 logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
 
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            logger.error(f"Connection error: {connection_error}")
+            logger.error(f"Connection error: {conn_error}")
             logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
 
         except KeyboardInterrupt:
             logger.info("Shutting down gracefully...")
             break
-
-        except Exception as error:
-            logger.error(f"Unexpected error in main loop: {error}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
 
             retry_count += 1
             if retry_count > max_retries:
@@ -231,14 +123,14 @@ async def main(config: dict) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="SCRIBE - consumes LLM issue-summary responses from trac_consumer.py",
+        description='TRAC Consumer - reads from a queue using JSON config',
     )
     parser.add_argument(
-        "config_file",
+        'config_file',
         type=str,
-        help="Path to the JSON configuration file",
-        default="scribe_config.json",
-        nargs="?",
+        help='Path to the JSON configuration file',
+        default='trac_config.json',
+        nargs='?',
     )
 
     args = parser.parse_args()

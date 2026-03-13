@@ -5,7 +5,7 @@ import argparse
 import asyncio
 import httpx
 
-from aio_pika.abc import AbstractIncomingMessage, AbstractExchange
+from aio_pika.abc import AbstractIncomingMessage
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 
 import serialization
@@ -92,13 +92,13 @@ async def process_message(message: AbstractIncomingMessage, config: dict):
     await update_speakers(filename, new_speakers, config)
     logger.info(f"Successfully updated speakers for {filename}")
     if sequence_number is not None and num_sequences is not None and sequence_number == num_sequences - 1:
-        # last one
+        # last one — notify TRAC that this file is ready for topic extraction
         async with dial_rabbit_from_config(config) as connection:
             async with await connection.channel() as channel:
-                exchange: AbstractExchange = await channel.get_exchange(config["file_done_exchange"])
-                await exchange.publish(
+                await channel.declare_queue(config["destination_queue"], durable=True)
+                await channel.default_exchange.publish(
                     aio_pika.Message(filename.encode("utf-8")),
-                    routing_key=config["file_done_exchange"],
+                    routing_key=config["destination_queue"],
                 )
 
 
@@ -127,22 +127,7 @@ async def main(config):
 
             async with connection:
                 async with await connection.channel() as channel:
-                    alt_exchange, topic_exchange, unrouted_queue, work_queue = await asyncio.gather(
-                        channel.declare_exchange(
-                            name=f"{config['file_done_exchange']}.unrouted",
-                            type=aio_pika.ExchangeType.FANOUT,
-                            durable=True,
-                        ),
-                        channel.declare_exchange(
-                            name=config["file_done_exchange"],
-                            type=aio_pika.ExchangeType.TOPIC,
-                            durable=True,
-                            arguments = {"alternate-exchange": f"{config['file_done_exchange']}.unrouted"},
-                        ),
-                        channel.declare_queue("file_done_unrouted_messages", durable=True),
-                        channel.declare_queue(config["work_queue"], durable=True),
-                    )
-                    await unrouted_queue.bind(alt_exchange)
+                    work_queue = await channel.declare_queue(config["work_queue"], durable=True)
 
                 logger.info(f"Successfully connected! Listening for jobs on queue: {work_queue.name}")
                 logger.info("Waiting for messages. To exit press CTRL+C")

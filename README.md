@@ -21,44 +21,28 @@ Ideally, this will help answer questions like, "I care about Issue X, how do I g
 ```mermaid
 flowchart TD
     Start([Download YouTube Video]) --> Audio[Audio File MP3]
-    
+
     Audio --> MINT[MINT Service<br/>Metadata Inference for<br/>Named Transcripts]
-    MINT --> |get details from filename| LLM[LLM]
-    LLM --> |Inferred Metadata| MINT
     MINT --> |Filename, Date, Title| DADS[DADS Service<br/>Diarization and<br/>Detection Service]
-    
+
     DADS --> |Speaker Segments<br/>+ Metadata| SLICE[SLICE Service<br/>Segment and Label<br/>Individual Chunks for Extraction]
     SLICE --> |Segmented Audio<br/>+ Metadata| Whisper[Whisper Transcription]
-    
+
     Whisper --> |Raw Transcription<br/>+ Speaker Labels<br/>+ Start/End Times| CLEAN[CLEAN Service<br/>Contextual Language Error<br/>Analysis and Normalization]
-    
-    CLEAN --> |Clean transcript prompt| LLM
-    LLM --> |Cleaned Transcription| CLEAN
+
     CLEAN --> |Cleaned Transcription<br/>+ All Metadata| GATE[GATE Service<br/>Guess Assessment and<br/>Transcription Evaluation]
-    
+
     GATE --> |Rejected<br/>Requeue for reprocessing| CLEAN
-    GATE --> |Accepted| AcceptedSplit{Accepted}
-    AcceptedSplit --> DBTranscriptions[(Database<br/>transcriptions collection)]
-    AcceptedSplit --> NAME[NAME Service<br/>Natural Attribution from<br/>Mentioned Entities]
-    
-    NAME --> |Determine Speaker Names Prompt| LLM
-    LLM --> |Speaker Names| NAME
-    NAME --> |Transcript Chunks With Names| GateSplit{Split Topology<br/>Topic Exchange}
+    GATE --> |Accepted| DBTranscriptions[(Database<br/>transcriptions collection)]
+    GATE --> |Accepted| NAME[NAME Service<br/>Natural Attribution from<br/>Mentioned Entities]
+
     NAME --> |Speaker Names<br/>+ Confidence Scores| DBTranscriptions
-    GateSplit --> |Transcript Chunks With Names| Topics[Get Topics Service]
-    GateSplit --> |Transcript Chunks With Names| People[Get People Service]
-    GateSplit --> |Transcript Chunks With Names| Orgs[Get Organizations Service]
-    
-    Topics --> |Extract Topics Prompt| LLM
-    LLM --> |Topics| Topics
-    Topics --> |Topics + Descriptions| DBTopics[(Database<br/>Topics Collection)]
-    People --> |Extract People Prompt| LLM
-    LLM --> |People| People
-    People --> |People + Descriptions| DBPeople[(Database<br/>People Collection)]
-    Orgs --> |Extract Orgs Prompt| LLM
-    LLM --> |Orgs| Orgs
-    Orgs --> |Organizations + Descriptions| DBOrgs[(Database<br/>Organizations Collection)]
-    
+    NAME --> |Completed filename| TRAC[TRAC Service<br/>Topic Recognition and<br/>Classification]
+
+    TRAC --> |Reads full transcript| DBTranscriptions
+    TRAC --> |Issue descriptions| SCRIBE[SCRIBE Service<br/>Summary Construction and<br/>Report Integration from Brief Extracts]
+    SCRIBE --> |Issues + descriptions| DBIssues[(Database<br/>Issues Collection)]
+
     style MINT fill:#000,stroke:#fff,color:#fff
     style DADS fill:#000,stroke:#fff,color:#fff
     style SLICE fill:#000,stroke:#fff,color:#fff
@@ -66,13 +50,10 @@ flowchart TD
     style CLEAN fill:#000,stroke:#fff,color:#fff
     style GATE fill:#000,stroke:#fff,color:#fff
     style NAME fill:#000,stroke:#fff,color:#fff
-    style Topics fill:#000,stroke:#fff,color:#fff
-    style People fill:#000,stroke:#fff,color:#fff
-    style Orgs fill:#000,stroke:#fff,color:#fff
+    style TRAC fill:#000,stroke:#fff,color:#fff
+    style SCRIBE fill:#000,stroke:#fff,color:#fff
     style DBTranscriptions fill:#000,stroke:#fff,color:#fff
-    style DBTopics fill:#000,stroke:#fff,color:#fff
-    style DBPeople fill:#000,stroke:#fff,color:#fff
-    style DBOrgs fill:#000,stroke:#fff,color:#fff
+    style DBIssues fill:#000,stroke:#fff,color:#fff
 ```
 
 ## Pipeline Stages
