@@ -16,6 +16,10 @@ import redis.asyncio as redis
 import aio_pika
 from aio_pika.abc import AbstractRobustConnection
 
+from logger import get_logger
+
+logger = get_logger("utils")
+
 
 #import torch
 # import torchaudio
@@ -93,18 +97,18 @@ def normalize_audio(audio_file_path: str):
     import torchaudio
 
     file_extension = os.path.splitext(audio_file_path)[1].lower()
-    print(f"Loading audio file {audio_file_path}")
-    
+    logger.info(f"Loading audio file {audio_file_path}")
+
     temp_wav_path = None
     try:
         if file_extension != ".wav":
             # Create a temporary WAV file on disk
             temp_wav_fd, temp_wav_path = tempfile.mkstemp(suffix=".wav")
             os.close(temp_wav_fd)  # Close the file descriptor, we just need the path
-            
+
             # Use ffmpeg to convert directly on disk without loading into memory
             # Convert to 16kHz mono directly since that's what we need for Whisper
-            print(f"Converting to temporary WAV file using ffmpeg: {temp_wav_path}")
+            logger.info(f"Converting to temporary WAV file using ffmpeg: {temp_wav_path}")
             num_threads = os.cpu_count() or 1  # Get CPU count, default to 1 if unavailable
             result = subprocess.run(
                 [
@@ -121,7 +125,7 @@ def normalize_audio(audio_file_path: str):
                 text=True,
                 check=True
             )
-            print(f"ffmpeg conversion completed using {num_threads} threads")
+            logger.info(f"ffmpeg conversion completed using {num_threads} threads")
             
             # Load from temporary WAV file using torchaudio
             signal, sr = torchaudio.load(temp_wav_path)
@@ -143,9 +147,9 @@ def normalize_audio(audio_file_path: str):
         if temp_wav_path and os.path.exists(temp_wav_path):
             try:
                 os.remove(temp_wav_path)
-                print(f"Cleaned up temporary WAV file: {temp_wav_path}")
+                logger.info(f"Cleaned up temporary WAV file: {temp_wav_path}")
             except Exception as e:
-                print(f"Warning: Could not remove temporary file {temp_wav_path}: {e}")
+                logger.error(f"Could not remove temporary file {temp_wav_path}: {e}")
 
 
 def load_config(config_file):
@@ -176,16 +180,16 @@ def load_config(config_file):
         
         return config
     except FileNotFoundError:
-        print(f"Error: Configuration file '{config_file}' not found.")
+        logger.error(f"Configuration file '{config_file}' not found.")
         sys.exit(1)
     except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON in configuration file: {e}")
+        logger.error(f"Invalid JSON in configuration file: {e}")
         sys.exit(1)
     except ValueError as e:
-        print(f"Error: {e}")
+        logger.error(f"{e}")
         sys.exit(1)
     except Exception as e:
-        print(f"Error loading configuration: {e}")
+        logger.error(f"Error loading configuration: {e}")
         sys.exit(1)
 
 
@@ -215,7 +219,7 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
     from transformers import AutoTokenizer
     from llama_cpp import Llama
     try:
-        print(f"Loading GGUF model for {device} device...")
+        logger.info(f"Loading GGUF model for {device} device...")
         model_path = model_path or "./Qwen3-32B-Q4_K_M.gguf"
         hf_model_name = hf_model_name or "Qwen/Qwen3-32B"
 
@@ -234,13 +238,13 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
             del os.environ['LLAMA_LOG_DISABLE']
 
         model_type = "llamacpp"
-        print(f"Successfully loaded GGUF model: {model_path}")
+        logger.info(f"Successfully loaded GGUF model: {model_path}")
         return model, tokenizer, model_type  # llama-cpp handles tokenization internally
     except ImportError:
-        print("llama-cpp-python not available. Install llama-cpp-python for CUDA support.")
+        logger.error("llama-cpp-python not available. Install llama-cpp-python for CUDA support.")
         raise
     except Exception as e:
-        print(f"Error loading GGUF model: {e}")
+        logger.error(f"Error loading GGUF model: {e}")
         raise
 
 def quantized_generate_from_prompt(
@@ -304,27 +308,25 @@ def quantized_generate_from_prompt(
                 if 'choices' in chunk and len(chunk['choices']) > 0:
                     choice = chunk['choices'][0]
                     token_text = choice.get('text', '')
-                    print(token_text, end="", flush=True)
+                    logger.info(token_text)
                     generated_text += token_text
 
                     # Check for finish reason (None, 'stop', 'length')
                     finish_reason = choice.get('finish_reason', None)
                     if finish_reason == 'stop':
-                        print("EOS token detected, stopping generation.")
+                        logger.info("EOS token detected, stopping generation.")
                         break
                     elif finish_reason == 'length':
-                        print("Max tokens reached.")
+                        logger.info("Max tokens reached.")
                         break
 
             return generated_text.strip()
         except Exception as e:
-            print(f"GGUF generation error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"GGUF generation error: {e}", exc_info=True)
             return ""
 
     else:
-        print(f"Unknown model type: {model_type}")
+        logger.error(f"Unknown model type: {model_type}")
         return ""
 
 
@@ -594,9 +596,9 @@ async def connect_redis(redis_config: dict):
     import redis.asyncio as redis
     
     if not redis_config:
-        print("Warning: No Redis configuration found. Message backup disabled.")
+        logger.info("No Redis configuration found. Message backup disabled.")
         return None
-    
+
     redis_client = await redis.Redis(
         host=redis_config['host'],
         port=redis_config['port'],
@@ -605,7 +607,7 @@ async def connect_redis(redis_config: dict):
         ssl_certfile=redis_config.get('ssl_certfile'),
         ssl_keyfile=redis_config.get('ssl_keyfile'),
     )
-    print(f"Connected to Redis at {redis_config['host']}:{redis_config['port']}")
+    logger.info(f"Connected to Redis at {redis_config['host']}:{redis_config['port']}")
     return redis_client
 
 
@@ -678,7 +680,7 @@ async def cleanup_redis_backups_by_pattern(
                 await redis_client.delete(*keys)
             if cursor == 0:
                 break
-    print(f"Cleaned up Redis backups matching pattern: {pattern}")
+    logger.info(f"Cleaned up Redis backups matching pattern: {pattern}")
 
 
 async def recover_messages_from_redis(
@@ -702,10 +704,10 @@ async def recover_messages_from_redis(
         Number of messages recovered
     """
     if redis_client is None:
-        print("No Redis connection - skipping recovery")
+        logger.info("No Redis connection - skipping recovery")
         return 0
-    
-    print("Checking Redis for backed up messages...")
+
+    logger.info("Checking Redis for backed up messages...")
     cursor = 0
     recovered_count = 0
     
@@ -719,10 +721,10 @@ async def recover_messages_from_redis(
                 break
     
     if not all_keys:
-        print("No backed up messages found in Redis")
+        logger.info("No backed up messages found in Redis")
         return 0
-    
-    print(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
+
+    logger.info(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
     
     # Process each backed up message
     for key in all_keys:
@@ -741,10 +743,10 @@ async def recover_messages_from_redis(
             recovered_count += 1
             
         except Exception as e:
-            print(f"Error recovering message from key {key}: {e}")
+            logger.error(f"Error recovering message from key {key}: {e}")
             continue
-    
-    print(f"Successfully recovered {recovered_count} messages from Redis")
+
+    logger.info(f"Successfully recovered {recovered_count} messages from Redis")
     return recovered_count
 
 async def publish_event(config: dict, event_message: str):
@@ -761,7 +763,7 @@ async def publish_event(config: dict, event_message: str):
     try:
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
         text = f"[{timestamp}] {event_message}"
-        print(f"EVENT: {text}")
+        logger.info(f"EVENT: {text}")
         async with await dial_rabbit_from_config(config) as connection:
             async with await connection.channel() as channel:
                 await channel.declare_queue("events", durable=True)
@@ -773,11 +775,11 @@ async def publish_event(config: dict, event_message: str):
                     routing_key="events",
                 )
     except Exception as e:
-        print(f"Warning: Failed to publish event '{event_message}': {e}")
+        logger.error(f"Failed to publish event '{event_message}': {e}")
 
 
 async def dial_rabbit_from_config(config: dict) -> AbstractRobustConnection:
-    print(f"Creating new RabbitMQ connection to {config['host']}:{config['port']}...")
+    logger.info(f"Creating new RabbitMQ connection to {config['host']}:{config['port']}...")
     rabbit_connection = await aio_pika.connect_robust(
         host=config['host'],
         port=config['port'],
@@ -787,7 +789,7 @@ async def dial_rabbit_from_config(config: dict) -> AbstractRobustConnection:
         ssl_context=create_ssl_context(),
         heartbeat=60,
     )
-    print("RabbitMQ connection established successfully")
+    logger.info("RabbitMQ connection established successfully")
     
     return rabbit_connection
 

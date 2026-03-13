@@ -9,8 +9,11 @@ from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 from pamqp.commands import Basic
 
 import serialization
+from logger import get_logger
 from utils import load_config, create_ssl_context, publish_event
 from wire_formats import WhisperJobDescription, WhisperResult, WhisperTimings
+
+logger = get_logger("whisper")
 
 def load_whisper_model(device):
     """
@@ -27,11 +30,11 @@ def load_whisper_model(device):
             "If you have the 'whisper' package installed, first uninstall it with: pip uninstall whisper"
         )
     
-    print(f"Loading Whisper large model on device: {device}")
+    logger.info(f"Loading Whisper large model on device: {device}")
     start_time = time.time()
     model = whisper.load_model("large", device=device)
     end_time = time.time()
-    print(f"Whisper model loaded in {end_time - start_time:.2f} seconds")
+    logger.info(f"Whisper model loaded in {end_time - start_time:.2f} seconds")
     
     return model
 
@@ -52,7 +55,7 @@ def perform_transcription(audio_data, whisper_model, temperature=0.2, language='
     Returns:
         Transcription result dictionary
     """
-    print(f"Starting transcription on audio with shape {audio_data.shape}")
+    logger.info(f"Starting transcription on audio with shape {audio_data.shape}")
     start_time = time.time()
     
     # Build transcription parameters
@@ -71,7 +74,7 @@ def perform_transcription(audio_data, whisper_model, temperature=0.2, language='
     result = whisper_model.transcribe(audio_data, **transcribe_params)
     
     end_time = time.time()
-    print(f"Transcription completed in {end_time - start_time:.2f} seconds")
+    logger.info(f"Transcription completed in {end_time - start_time:.2f} seconds")
     
     return result
 
@@ -80,7 +83,7 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper
     """
     Process a transcription job message from RabbitMQ.
     """
-    print(f"Received message")
+    logger.info("Received message")
     job_desc: WhisperJobDescription = serialization.load(message.body.decode())
     filename = job_desc.transcript_metadata.filename
     segment_count = job_desc.segment_count
@@ -91,7 +94,7 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper
     if len(audio_data) == 0:
         raise ValueError("Empty audio data received")
 
-    print(f"Audio data shape: {audio_data.shape}, duration: ~{len(audio_data) / 16000:.2f}s")
+    logger.info(f"Audio data shape: {audio_data.shape}, duration: ~{len(audio_data) / 16000:.2f}s")
 
     # Run transcription in thread pool to prevent blocking the event loop
     loop = asyncio.get_event_loop()
@@ -131,8 +134,8 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper
         )
         publish_succeeded = True
     except (ChannelInvalidStateError, ChannelClosed) as channel_error:
-        print(f"Channel error while sending response: {channel_error}")
-        print(f"Message will be re-queued for retry")
+        logger.error(f"Channel error while sending response: {channel_error}")
+        logger.info("Message will be re-queued for retry")
         await publish_event(
             config,
             f"WHISPER_PUBLISH_FAILED_NACK: {filename} segment {segment_count}/{total_segments} "
@@ -143,7 +146,7 @@ async def process_message(message: aio_pika.abc.AbstractIncomingMessage, whisper
         await message.nack(requeue=True)
         return
 
-    print(f"Job completed and response sent to {destination_queue}")
+    logger.info(f"Job completed and response sent to {destination_queue}")
 
     # Acknowledge successful processing - result was already published above
     try:
@@ -164,15 +167,15 @@ async def main(config):
     Main function to start the whisper transcription consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing Whisper transcription consumer...")
-    
+    logger.info("Initializing Whisper transcription consumer...")
+
     # Retry configuration
     max_retries = 10
     base_retry_delay = 2  # seconds
     max_retry_delay = 60  # seconds
-    
+
     # Load the Whisper model once at startup
-    print("Loading Whisper model...")
+    logger.info("Loading Whisper model...")
     whisper_model = load_whisper_model(device)
     
     ssl_context = create_ssl_context()
@@ -184,7 +187,7 @@ async def main(config):
     while True:
         try:
             # Connect to RabbitMQ with TLS
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             
             connection = await aio_pika.connect_robust(
                 host=config['host'],
@@ -213,8 +216,8 @@ async def main(config):
                     channel.declare_queue(results_queue, durable=True)
                 )
                 
-                print(f"Successfully connected! Listening for transcription jobs on queue: {work_queue}")
-                print("Waiting for transcription jobs. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for transcription jobs on queue: {work_queue}")
+                logger.info("Waiting for transcription jobs. To exit press CTRL+C")
                 
                 # Start consuming messages
                 async with queue.iterator() as queue_iter:
@@ -222,43 +225,38 @@ async def main(config):
                         try:
                             await process_message(message, whisper_model, results_queue, config)
                         except (ChannelInvalidStateError, ChannelClosed) as channel_err:
-                            print(f"Channel error during message processing: {channel_err}")
-                            print("Will attempt to reconnect...")
+                            logger.error(f"Channel error during message processing: {channel_err}")
+                            logger.info("Will attempt to reconnect...")
                             # Break out of the message loop to reconnect
                             raise
                         except Exception as e:
-                            print(f"Unexpected error processing message: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            logger.error(f"Unexpected error processing message: {e}", exc_info=True)
                             # Continue processing other messages
                             
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
-            # Calculate exponential backoff delay
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -296,13 +294,12 @@ Configuration file format (JSON):
     # Load configuration from file
     config = load_config(args.config_file)
     
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
-    
-    # Run main with config
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
+
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

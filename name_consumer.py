@@ -11,7 +11,10 @@ from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 import serialization
 import wire_formats
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
+
+logger = get_logger("name_consumer")
 
 
 async def update_speakers(filename: str, new_speakers: dict, config: dict):
@@ -55,7 +58,7 @@ async def update_speakers(filename: str, new_speakers: dict, config: dict):
                         content=json.dumps(docs_to_update),
                     )
                     response.raise_for_status()
-                    print(f"updated {len(docs_to_update)} speaker sections from {filename} with:\n{json.dumps(new_speakers, indent=4)}")
+                    logger.info(f"updated {len(docs_to_update)} speaker sections from {filename} with:\n{json.dumps(new_speakers, indent=4)}")
 
                 start += page_size
                 if start >= result['numFound']:
@@ -71,25 +74,23 @@ async def process_message(message: AbstractIncomingMessage, config: dict):
         sequence_number = response.state.get("sequence_number", None)
         num_sequences = response.state.get("num_sequences", None)
 
-    print(f"Received identification response for file: {filename}")
+    logger.info(f"Received identification response for file: {filename}")
 
     answer = get_answer(generated_text, "```json", "```")
     if not answer:
-        print(f"No JSON answer found in generated text for {filename}")
+        logger.info(f"No JSON answer found in generated text for {filename}")
         return
 
     try:
         new_speakers = json.loads(answer)
     except json.JSONDecodeError as e:
-        print(f"Error parsing speaker JSON: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error parsing speaker JSON: {e}", exc_info=True)
         return
 
-    print(f"Parsed {len(new_speakers)} speaker identifications for {filename}")
+    logger.info(f"Parsed {len(new_speakers)} speaker identifications for {filename}")
 
     await update_speakers(filename, new_speakers, config)
-    print(f"Successfully updated speakers for {filename}")
+    logger.info(f"Successfully updated speakers for {filename}")
     if sequence_number is not None and num_sequences is not None and sequence_number == num_sequences - 1:
         # last one
         async with dial_rabbit_from_config(config) as connection:
@@ -106,7 +107,7 @@ async def main(config):
     Main function to start the RabbitMQ consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing RabbitMQ name consumer...")
+    logger.info("Initializing RabbitMQ name consumer...")
 
     # Retry configuration
     max_retries = 10
@@ -117,7 +118,7 @@ async def main(config):
 
     while True:
         try:
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             redis_client = await dial_redis_from_config(config)
             
@@ -143,8 +144,8 @@ async def main(config):
                     )
                     await unrouted_queue.bind(alt_exchange)
 
-                print(f"Successfully connected! Listening for jobs on queue: {work_queue.name}")
-                print("Waiting for messages. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for jobs on queue: {work_queue.name}")
+                logger.info("Waiting for messages. To exit press CTRL+C")
 
                 # Start consuming messages
                 async with CachedMessageIterator(
@@ -161,30 +162,27 @@ async def main(config):
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
-            # Calculate exponential backoff delay
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -201,12 +199,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

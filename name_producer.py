@@ -14,9 +14,12 @@ import redis.asyncio as redis
 from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel
 
 import serialization
+from logger import get_logger
 from sliding_window import SlidingWindow
 from utils import load_config, create_ssl_context, publish_event
 from wire_formats import CleanedWhisperResult, LLMPromptJob, Metaparams
+
+logger = get_logger("name_producer")
 
 MAX_PROMPT_TRANSCRIPT_LENGTH = 10000
 PROMPT_TEMPLATE = """The following is an excerpt from an automatically transcribed meeting:
@@ -78,7 +81,7 @@ class SpeakerIdentificationProducer:
         """Connect to Redis for message backup."""
         redis_config = self.config.get('redis', {})
         if not redis_config:
-            print("Warning: No Redis configuration found. Message backup disabled.")
+            logger.info("No Redis configuration found. Message backup disabled.")
             return
         
         self.redis_client = await redis.Redis(
@@ -89,7 +92,7 @@ class SpeakerIdentificationProducer:
             ssl_certfile=redis_config.get('ssl_certfile'),
             ssl_keyfile=redis_config.get('ssl_keyfile'),
         )
-        print(f"Connected to Redis at {redis_config['host']}:{redis_config['port']}")
+        logger.info(f"Connected to Redis at {redis_config['host']}:{redis_config['port']}")
 
     async def _backup_message_to_redis(self, filename: str, sequence_number: int, message_body: bytes):
         """Backup message to Redis before acknowledging."""
@@ -125,7 +128,7 @@ class SpeakerIdentificationProducer:
                     await self.redis_client.delete(*keys)
                 if cursor == 0:
                     break
-        print(f"Cleaned up Redis backups for {filename}")
+        logger.info(f"Cleaned up Redis backups for {filename}")
 
     def _make_sliding_window_for(self, filename: str, channel: AbstractRobustChannel) -> SlidingWindow:
         """Create a SlidingWindow whose callback publishes an LLM prompt job for filename."""
@@ -139,9 +142,9 @@ class SpeakerIdentificationProducer:
             last_number = sequence_numbers[0]
             for num in sequence_numbers[1:]:
                 if num != last_number + 1:
-                    print(f"non-monotonic number, {num} follows {last_number}")
+                    logger.info(f"non-monotonic number, {num} follows {last_number}")
                 last_number = num
-            print(f"sending prompt with texts from sequence numbers: {sequence_numbers[0]}-{sequence_numbers[-1]}")
+            logger.info(f"sending prompt with texts from sequence numbers: {sequence_numbers[0]}-{sequence_numbers[-1]}")
 
             remove_coros = [self._remove_message_from_redis(filename, seq) for seq in sequence_numbers]
             await asyncio.gather(*remove_coros, self.send(channel, filename, sequence_number, total_segments, prompt_text))
@@ -187,10 +190,10 @@ class SpeakerIdentificationProducer:
     async def _recover_from_redis(self, channel: AbstractRobustChannel):
         """Recover messages from Redis after a crash or restart."""
         if self.redis_client is None:
-            print("No Redis connection - skipping recovery")
+            logger.info("No Redis connection - skipping recovery")
             return
-        
-        print("Checking Redis for backed up messages...")
+
+        logger.info("Checking Redis for backed up messages...")
         pattern = "nameproducerbackup:*"
         cursor = 0
 
@@ -203,10 +206,10 @@ class SpeakerIdentificationProducer:
                     break
         
         if not all_keys:
-            print("No backed up messages found in Redis")
+            logger.info("No backed up messages found in Redis")
             return
-        
-        print(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
+
+        logger.info(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
 
         recovered_by_filename: dict[str, list[CleanedWhisperResult]] = defaultdict(list)
         for key in all_keys:
@@ -219,7 +222,7 @@ class SpeakerIdentificationProducer:
                 filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
                 recovered_by_filename[filename].append(cleaned_whisper_result)
             except Exception as e:
-                print(f"Error recovering message from key {key}: {e}")
+                logger.error(f"Error recovering message from key {key}: {e}")
 
         recovered_count = 0
         for filename, results in recovered_by_filename.items():
@@ -230,7 +233,7 @@ class SpeakerIdentificationProducer:
                 await sliding_window.append(cleaned_whisper_result)
                 recovered_count += 1
 
-        print(f"Successfully recovered {recovered_count} messages from Redis")
+        logger.info(f"Successfully recovered {recovered_count} messages from Redis")
 
     async def run(self):
         """
@@ -262,8 +265,8 @@ class SpeakerIdentificationProducer:
                 channel.declare_queue(self.config["destination_queue"], durable=True)
             )
 
-            print(f"Successfully connected! Listening for speaker identification jobs on queue: {work_queue}")
-            print("Waiting for jobs. To exit press CTRL+C")
+            logger.info(f"Successfully connected! Listening for speaker identification jobs on queue: {work_queue}")
+            logger.info("Waiting for jobs. To exit press CTRL+C")
 
             async with queue.iterator() as queue_iter:
                 async for message in queue_iter:
@@ -281,7 +284,7 @@ class SpeakerIdentificationProducer:
                     except TypeError as type_err:
                         if "not supported between instances" not in str(type_err):
                             raise
-                        print(f"duplicate sequence number for {filename}, skipping")
+                        logger.info(f"duplicate sequence number for {filename}, skipping")
                         await publish_event(
                             self.config,
                             f"NAME_PRODUCER_DUPLICATE_SEQUENCE: {filename} segment {sequence_number} "
@@ -299,7 +302,7 @@ async def main(config):
     Main function to start the speaker identification consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing speaker identification consumer...")
+    logger.info("Initializing speaker identification consumer...")
     producer = SpeakerIdentificationProducer(config)
     await producer.run()
 
@@ -328,13 +331,13 @@ Configuration file format (JSON):
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"Model path: {config.get('model_path', 'default (Qwen/Qwen2.5-7B-Instruct)')}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"Model path: {config.get('model_path', 'default (Qwen/Qwen2.5-7B-Instruct)')}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

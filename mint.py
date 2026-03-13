@@ -13,8 +13,11 @@ from transformers import AutoTokenizer, Qwen2Tokenizer
 import serialization
 import wire_formats
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import Metaparams
+
+logger = get_logger("mint")
 
 
 def create_transcript_metadata_prompt(filename: str, tokenizer: Qwen2Tokenizer) -> str:
@@ -121,10 +124,10 @@ async def process_message(
             try:
                 answer = wire_formats.TranscriptMetadata(**json.loads(answer_str))
             except TypeError:
-                print(f"Failed to parse answer JSON: {answer_str}")
+                logger.error(f"Failed to parse answer JSON: {answer_str}")
                 return
             except JSONDecodeError as jde:
-                print(f"Invalid JSON format in answer: {answer_str}\nError: {jde}")
+                logger.error(f"Invalid JSON format in answer: {answer_str}\nError: {jde}")
                 return
 
             async with await rabbitmq_connection.channel() as pub_channel:
@@ -135,9 +138,7 @@ async def process_message(
                     routing_key=result_queue,
                 )
     except Exception as e:
-        print(f"Error processing message: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error processing message: {e}", exc_info=True)
 
 
 async def main(config):
@@ -145,21 +146,21 @@ async def main(config):
     Main function to start the RabbitMQ consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing RabbitMQ consumer...")
-    
+    logger.info("Initializing RabbitMQ consumer...")
+
     # Retry configuration
     max_retries = 10
     base_retry_delay = 2  # seconds
     max_retry_delay = 60  # seconds
-    
-    print(f"Loading tokenizer...")
+
+    logger.info("Loading tokenizer...")
     tokenizer: Qwen2Tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-32B")
     
     retry_count = 0
     
     while True:
         try:
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             redis_client = await dial_redis_from_config(config)
             
@@ -173,8 +174,8 @@ async def main(config):
                         channel.declare_queue(result_queue, durable=True),
                     )
 
-                print(f"Successfully connected! Listening for jobs on queue: {work_queue}")
-                print("Waiting for messages. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for jobs on queue: {work_queue}")
+                logger.info("Waiting for messages. To exit press CTRL+C")
                 
                 # Start consuming messages
                 async with CachedMessageIterator(
@@ -191,17 +192,16 @@ async def main(config):
         except (Exception,) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
-            # Calculate exponential backoff delay
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
 
 
@@ -235,12 +235,12 @@ Message format (JSON):
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

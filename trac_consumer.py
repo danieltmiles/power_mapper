@@ -6,9 +6,12 @@ import aio_pika
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 
 import serialization
+from logger import get_logger
 from relationship_parser import RelationshipParser
 from utils import load_config, dial_rabbit_from_config, get_answer
 from wire_formats import LLMPromptResponse, LLMPromptJob
+
+logger = get_logger("trac_consumer")
 
 
 async def process_message(message, llm_channel, config):
@@ -48,7 +51,7 @@ async def process_message(message, llm_channel, config):
             )
 
     except Exception as e:
-        print(f"Error processing message: {e}")
+        logger.error(f"Error processing message: {e}")
     finally:
         await message.ack()
 
@@ -70,7 +73,7 @@ async def main(config):
 
     while True:
         try:
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
 
             retry_count = 0
 
@@ -85,8 +88,8 @@ async def main(config):
                     await channel.set_qos(prefetch_count=1)
                     queue = await channel.declare_queue(config["work_queue"], durable=True)
 
-                    print(f"Successfully connected! Listening for jobs on queue: {queue.name}")
-                    print("Waiting for messages. To exit press CTRL+C")
+                    logger.info(f"Successfully connected! Listening for jobs on queue: {queue.name}")
+                    logger.info("Waiting for messages. To exit press CTRL+C")
 
                     async with queue.iterator() as queue_iter:
                         async for message in queue_iter:
@@ -95,30 +98,27 @@ async def main(config):
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
-            # Calculate exponential backoff delay
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -137,11 +137,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

@@ -58,13 +58,16 @@ from sympy.physics.units import temperature
 import serialization
 import wire_formats
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from utils import load_config, create_ssl_context, load_quantized_llm_model, quantized_generate_from_prompt, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import LLMPromptJob, Metaparams
+
+logger = get_logger("llm")
 
 # Device detection - prioritize CUDA over MPS
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
 model_type = None
-print(f"Detected device: {device}")
+logger.info(f"Detected device: {device}")
 
 
 def generate_text(prompt: str, model, tokenizer, params: dict) -> str:
@@ -80,7 +83,7 @@ def generate_text(prompt: str, model, tokenizer, params: dict) -> str:
     Returns:
         str: Generated text
     """
-    print(json.dumps(params, indent=4))
+    logger.info(json.dumps(params, indent=4))
     # Extract parameters with defaults
     max_tokens = params.get('max_tokens', 4096)
     temperature = params.get('temperature', 0.7)
@@ -104,7 +107,7 @@ def generate_text(prompt: str, model, tokenizer, params: dict) -> str:
         stop=stop,
     )
     end = time.time()
-    print(f"Generation completed, {len(generated_text)} characters in {end - start:.2f} seconds")
+    logger.info(f"Generation completed, {len(generated_text)} characters in {end - start:.2f} seconds")
     return generated_text
 
 
@@ -168,7 +171,7 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
     try:
         job_desc: LLMPromptJob = serialization.load(message.body.decode(), cls=LLMPromptJob)
     except TypeError as type_error:
-        print(type_error)
+        logger.error(str(type_error))
         body = json.loads(message.body.decode())
         job_desc = LLMPromptJob(
             job_id=body.get("job_id"),
@@ -192,10 +195,10 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
                 params_kwargs["repetition_penalty"] = repetition_penalty
             job_desc.meta_params = Metaparams(**params_kwargs)
     
-    print(f"Received job {job_desc.job_id}, request {job_desc.request_id}")
+    logger.info(f"Received job {job_desc.job_id}, request {job_desc.request_id}")
 
     if isinstance(job_desc.prompt, list):
-        print(f"Prompt is a conversation with {len(job_desc.prompt)} messages")
+        logger.info(f"Prompt is a conversation with {len(job_desc.prompt)} messages")
         text_prompt = tokenizer.apply_chat_template(
             job_desc.prompt,
             tokenize=False,
@@ -204,18 +207,18 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
         begin_thinking_token = find_begin_thinking_token(tokenizer)
         if begin_thinking_token:
             if job_desc.encourage_thinking:
-                print(f"Encouraging thinking: appending {begin_thinking_token!r}")
+                logger.info(f"Encouraging thinking: appending {begin_thinking_token!r}")
                 text_prompt += begin_thinking_token + "\n"
             else:
                 end_thinking_token = find_end_thinking_token(tokenizer)
-                print(f"Suppressing thinking: appending {begin_thinking_token!r}{end_thinking_token!r}")
+                logger.info(f"Suppressing thinking: appending {begin_thinking_token!r}{end_thinking_token!r}")
                 text_prompt += begin_thinking_token + (end_thinking_token or "") + "\n"
     else:
-        print(f"Prompt length: {len(job_desc.prompt)} chars")
+        logger.info(f"Prompt length: {len(job_desc.prompt)} chars")
         text_prompt = job_desc.prompt
 
     # Run text generation in thread pool to prevent blocking
-    print(f"<prompt>\n{text_prompt}\n</prompt>")
+    logger.info(f"<prompt>\n{text_prompt}\n</prompt>")
     loop = asyncio.get_event_loop()
     start = time.time()
     generated_text = await loop.run_in_executor(
@@ -227,7 +230,7 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
         job_desc.meta_params.asdict(),
     )
     end = time.time()
-    print(f"Generated {len(generated_text)} chars in {end - start:.2f} seconds")
+    logger.info(f"Generated {len(generated_text)} chars in {end - start:.2f} seconds")
     
     # Prepare response
     response = wire_formats.LLMPromptResponse.from_llm_prompt_job(job_desc, generated_text=generated_text)
@@ -241,7 +244,7 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
             if hasattr(message, 'headers') and message.headers:
                 response_headers = dict(message.headers)
 
-            print(f"publishing response to {job_desc.reply_to}")
+            logger.info(f"publishing response to {job_desc.reply_to}")
             await channel.default_exchange.publish(
                 aio_pika.Message(
                     body=serialization.dumps(response).encode(),
@@ -251,7 +254,7 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
                 routing_key=job_desc.reply_to,
             )
 
-    print(f"Job {job_desc.job_id} request {job_desc.request_id} completed and response sent")
+    logger.info(f"Job {job_desc.job_id} request {job_desc.request_id} completed and response sent")
 
 
 async def main(config):
@@ -259,15 +262,15 @@ async def main(config):
     Main function to start the LLM worker with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing generic LLM worker...")
-    
+    logger.info("Initializing generic LLM worker...")
+
     # Retry configuration
     max_retries = 10
     base_retry_delay = 2  # seconds
     max_retry_delay = 60  # seconds
-    
+
     # Load model once at startup
-    print("Loading LLM model...")
+    logger.info("Loading LLM model...")
     model_path = config.get('model_path')
     hf_model_name = config.get('hf_model_name')
     global model_type
@@ -278,7 +281,7 @@ async def main(config):
     while True:
         try:
             # Connect to RabbitMQ
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             redis_client = await dial_redis_from_config(config)
             
@@ -290,8 +293,8 @@ async def main(config):
                     work_queue = config['work_queue']
                     await channel.declare_queue(work_queue, durable=True)
                 
-                print(f"Successfully connected! Listening for LLM jobs on queue: {work_queue}")
-                print("Waiting for jobs. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for LLM jobs on queue: {work_queue}")
+                logger.info("Waiting for jobs. To exit press CTRL+C")
                 
                 # Start consuming messages
                 async with CachedMessageIterator(
@@ -308,29 +311,27 @@ async def main(config):
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -373,13 +374,13 @@ Message format (JSON):
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"Model path: {config.get('model_path', 'default')}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"Model path: {config.get('model_path', 'default')}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

@@ -29,8 +29,11 @@ import redis.asyncio as redis
 import serialization
 import shared_disks
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from utils import diarized_segment_iter, assign_speaker_to_segment, normalize_audio, create_ssl_context
 from wire_formats import DiarizationResponse, WhisperJobDescription, WhisperJobAudioSegment
+
+logger = get_logger("slice")
 
 
 class AssembleDiarizationService:
@@ -49,9 +52,9 @@ class AssembleDiarizationService:
         self.work_queue = self.config.get("work_queue")
         self.destination_queue = self.config.get("destination_queue")
 
-        print(f"Assemble Diarization Service initialized")
-        print(f"  Listening on: {self.work_queue}")
-        print(f"  Sending to: {self.destination_queue}")
+        logger.info("Assemble Diarization Service initialized")
+        logger.info(f"  Listening on: {self.work_queue}")
+        logger.info(f"  Sending to: {self.destination_queue}")
 
     def _load_config(self, config_file: str) -> dict[str, Any]:
         """Load RabbitMQ configuration from JSON file."""
@@ -150,7 +153,7 @@ class AssembleDiarizationService:
             # Skip segments that are less than half a second long
             segment_duration = segment['end'] - segment['start']
             if segment_duration < MIN_SEGMENT_DURATION:
-                print(f"Skipping short segment ({segment_duration:.3f}s) for speaker {segment['speaker']}")
+                logger.info(f"Skipping short segment ({segment_duration:.3f}s) for speaker {segment['speaker']}")
                 continue
             
             audio_data = segment['audio']
@@ -159,7 +162,7 @@ class AssembleDiarizationService:
                 segments_list.append(segment)
             else:
                 # Split large segment into chunks
-                print(f"Splitting large segment ({len(audio_data)} samples) for speaker {segment['speaker']}")
+                logger.info(f"Splitting large segment ({len(audio_data)} samples) for speaker {segment['speaker']}")
                 num_chunks = (len(audio_data) + MAX_AUDIO_SAMPLES - 1) // MAX_AUDIO_SAMPLES
                 chunk_size = len(audio_data) // num_chunks
                 
@@ -179,7 +182,7 @@ class AssembleDiarizationService:
                         'end': chunk_end_time,
                         'speaker': segment['speaker'],
                     })
-                    print(f"  Created chunk {i+1}/{num_chunks}: {len(chunk_audio)} samples")
+                    logger.info(f"  Created chunk {i+1}/{num_chunks}: {len(chunk_audio)} samples")
         
         return segments_list
     
@@ -199,14 +202,14 @@ class AssembleDiarizationService:
         # Deserialize diarization result
         diarization_encoded = diarization_response.diarization
         if not diarization_encoded:
-            print(f"✗ No diarization data in message")
+            logger.error("No diarization data in message")
             return
-        
+
         try:
             diarization_bytes = base64.b64decode(diarization_encoded)
             diarization = pickle.loads(diarization_bytes)
         except Exception as e:
-            print(f"✗ Failed to deserialize diarization: {e}")
+            logger.error(f"Failed to deserialize diarization: {e}")
             return
         
         # Get the audio file from remote storage
@@ -226,29 +229,29 @@ class AssembleDiarizationService:
                 diarization_response.transcript_metadata.filename,
                 temp_audio_path,
             )
-            print(f"  Downloaded to {temp_audio_path}")
+            logger.info(f"  Downloaded to {temp_audio_path}")
         except Exception as e:
-            print(f"✗ Failed to download audio: {e}")
+            logger.error(f"Failed to download audio: {e}")
             return
 
         try:
             # Normalize audio
-            print("Normalizing audio...")
+            logger.info("Normalizing audio...")
             signal, sr = normalize_audio(temp_audio_path)
-            
+
             # Consolidate segments by speaker
-            print("Consolidating segments by speaker...")
+            logger.info("Consolidating segments by speaker...")
             consolidated_segments = self.consolidate_segments_by_speaker(
                 signal.numpy() if hasattr(signal, 'numpy') else signal,
                 diarization,
                 sr
             )
-            print(f"  Created {len(consolidated_segments)} consolidated segments")
-            
+            logger.info(f"  Created {len(consolidated_segments)} consolidated segments")
+
             # Split large segments
-            print("Splitting large segments if needed...")
+            logger.info("Splitting large segments if needed...")
             segments_list = self.split_large_segments(consolidated_segments, sr)
-            print(f"  Final segment count: {len(segments_list)}")
+            logger.info(f"  Final segment count: {len(segments_list)}")
             
             # Send whisper jobs
             await self.send_whisper_jobs(
@@ -261,7 +264,7 @@ class AssembleDiarizationService:
             # Clean up temporary file
             if os.path.exists(temp_audio_path):
                 os.remove(temp_audio_path)
-                print(f"Cleaned up temporary file: {temp_audio_path}")
+                logger.info(f"Cleaned up temporary file: {temp_audio_path}")
     
     async def wait_for_queue_backpressure(
         self,
@@ -290,7 +293,7 @@ class AssembleDiarizationService:
             if message_count < max_messages:
                 return
             
-            print(f"  Back-pressure: Queue has {message_count} messages, waiting for it to drop below {max_messages}...")
+            logger.info(f"  Back-pressure: Queue has {message_count} messages, waiting for it to drop below {max_messages}...")
             await asyncio.sleep(check_interval)
     
     async def send_whisper_jobs(
@@ -302,8 +305,8 @@ class AssembleDiarizationService:
         total_segments = len(segments_list)
         whisper_job_id = str(uuid.uuid4())
         
-        print(f"\nSending {total_segments} segments to {self.destination_queue}...")
-        print(f"  Whisper job ID: {whisper_job_id}")
+        logger.info(f"Sending {total_segments} segments to {self.destination_queue}...")
+        logger.info(f"  Whisper job ID: {whisper_job_id}")
 
         for i, segment in enumerate(segments_list):
 
@@ -329,10 +332,10 @@ class AssembleDiarizationService:
             )
             
             if (i + 1) % 10 == 0 or (i + 1) == total_segments:
-                print(f"  Sent {i + 1}/{total_segments} whisper jobs")
+                logger.info(f"  Sent {i + 1}/{total_segments} whisper jobs")
                 await self.wait_for_queue_backpressure(channel)
 
-        print(f"✓ Successfully sent all {total_segments} whisper jobs")
+        logger.info(f"Successfully sent all {total_segments} whisper jobs")
 
     async def run(self) -> None:
         """
@@ -347,9 +350,7 @@ class AssembleDiarizationService:
             ssl_certfile=redis_config.get('ssl_certfile'),
             ssl_keyfile=redis_config.get('ssl_keyfile'),
         )
-        print(f"\n{'='*60}")
-        print("Starting Assemble Diarization Service")
-        print(f"{'='*60}\n")
+        logger.info("Starting Assemble Diarization Service")
 
         while True:
             try:
@@ -371,8 +372,8 @@ class AssembleDiarizationService:
                         channel.declare_queue(self.destination_queue, durable=True),
                     )
 
-                    print(f"Listening for diarization results on: {self.work_queue}")
-                    print("Waiting for messages... (Press Ctrl+C to exit)\n")
+                    logger.info(f"Listening for diarization results on: {self.work_queue}")
+                    logger.info("Waiting for messages... (Press Ctrl+C to exit)")
 
                     # Consume messages
                     async with CachedMessageIterator(
@@ -388,8 +389,7 @@ class AssembleDiarizationService:
                                 await self.process_diarization_result(diarization_result, channel)
             except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError, Exception) as conn_error:
                 try:
-                    # re-dial
-                    print(f"{conn_error}\n\nChannel closed unexpectedly, reconnecting...")
+                    logger.error(f"Channel closed unexpectedly, reconnecting: {conn_error}")
                     if connection and not connection.is_closed:
                         await connection.close()
                     if channel and not channel.is_closed:
@@ -419,14 +419,12 @@ async def main():
         service = AssembleDiarizationService(config_file=args.config_file)
         await service.run()
     except FileNotFoundError as e:
-        print(f"✗ Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\n\n✓ Service stopped by user")
+        logger.info("Service stopped by user")
     except Exception as e:
-        print(f"✗ Unexpected error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Unexpected error: {e}", exc_info=True)
         sys.exit(1)
 
 

@@ -18,7 +18,10 @@ from pyannote.audio.tasks import SpeakerDiarization
 
 import serialization
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from wire_formats import TranscriptMetadata, DiarizationResponse
+
+logger = get_logger("dads")
 
 torch.serialization.add_safe_globals([pyannote.audio.core.task.Specifications])
 torch.serialization.safe_globals([pyannote.audio.core.task.Problem])
@@ -48,7 +51,7 @@ def perform_diarization(waveform, sample_rate, pipeline):
     Returns:
         DiarizeOutput object containing diarization results
     """
-    print(f"Starting diarization on waveform with shape {waveform.shape}, sample_rate={sample_rate}")
+    logger.info(f"Starting diarization on waveform with shape {waveform.shape}, sample_rate={sample_rate}")
     start_time = time.time()
     
     # Ensure waveform is 2D (channel, time) as required by pyannote
@@ -59,7 +62,7 @@ def perform_diarization(waveform, sample_rate, pipeline):
     diarization: DiarizeOutput = pipeline({"waveform": waveform, "sample_rate": sample_rate})
     
     end_time = time.time()
-    print(f"Diarization completed in {end_time - start_time:.2f} seconds")
+    logger.info(f"Diarization completed in {end_time - start_time:.2f} seconds")
     
     return diarization
 
@@ -85,7 +88,7 @@ async def process_message(
     """
     Process a diarization job message from RabbitMQ.
     """
-    print(f"Received message")
+    logger.info("Received message")
     transcript_metadata: TranscriptMetadata = serialization.load(message.body.decode())
 
     storage_info = config.get("storage_info")
@@ -94,9 +97,9 @@ async def process_message(
         info=storage_info,
     )
     local_filename = f"/tmp/{transcript_metadata.filename}"
-    print("retrieving remote file")
+    logger.info("retrieving remote file")
     remote_storage.retrieve(Path(transcript_metadata.filename).name, local_filename)
-    print("retrieved remote file")
+    logger.info("retrieved remote file")
     signal, sr = normalize_audio(local_filename)
 
     # Move waveform to appropriate device
@@ -120,17 +123,17 @@ async def process_message(
                 ),
                 routing_key=routing_key,
             )
-            print(f"response from default exchange publish: {resp}")
+            logger.info(f"response from default exchange publish: {resp}")
 
-    print(f"Job completed and response sent to {routing_key}")
+    logger.info(f"Job completed and response sent to {routing_key}")
 
 async def main(config):
     """
     Main function to start the diarization consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing diarization consumer...")
-    print(f"Loading diarization pipeline...")
+    logger.info("Initializing diarization consumer...")
+    logger.info("Loading diarization pipeline...")
     
     # Retry configuration
     max_retries = 10
@@ -144,7 +147,7 @@ async def main(config):
         token=load_hf_token(),
     ).to(torch.device(device))
     end = time.time()
-    print(f"Pipeline loaded in {end - start:.2f} seconds")
+    logger.info(f"Pipeline loaded in {end - start:.2f} seconds")
     
     ssl_context = create_ssl_context()
     # If using self-signed certificates, uncomment:
@@ -155,7 +158,7 @@ async def main(config):
     while True:
         try:
             # Connect to RabbitMQ with TLS
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             redis_client = await dial_redis_from_config(config)
             async with connection:
@@ -168,8 +171,8 @@ async def main(config):
                         channel.declare_queue(destination_queue, durable=True),
                     )
 
-                print(f"Successfully connected! Listening for diarization jobs on queue: {work_queue}")
-                print("Waiting for diarization jobs. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for diarization jobs on queue: {work_queue}")
+                logger.info("Waiting for diarization jobs. To exit press CTRL+C")
                 
                 # Start consuming messages
                 async with CachedMessageIterator(
@@ -186,30 +189,27 @@ async def main(config):
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
-                raise
-            
-            # Calculate exponential backoff delay
-            delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
-            await asyncio.sleep(delay)
-            
-        except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
-            break
-        except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            retry_count += 1
-            if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
 
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            await asyncio.sleep(delay)
+
+        except KeyboardInterrupt:
+            logger.info("Shutting down gracefully...")
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+
+            retry_count += 1
+            if retry_count > max_retries:
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
+                raise
+
+            delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -241,13 +241,12 @@ Configuration file format (JSON):
     # Load configuration from file
     config = load_config(args.config_file)
     
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
-    
-    # Run main with config
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
+
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

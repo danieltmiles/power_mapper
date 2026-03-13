@@ -9,7 +9,10 @@ import redis.asyncio as redis
 from aio_pika.abc import AbstractRobustConnection, AbstractIncomingMessage, AbstractChannel
 from aiormq import ChannelInvalidStateError
 
+from logger import get_logger
 from utils import dial_rabbit_from_config, publish_event
+
+logger = get_logger("cached_iterator")
 
 
 class CachedIncomingMessage(AbstractIncomingMessage):
@@ -91,7 +94,7 @@ class CachedMessageIterator:
                 if cursor == 0:
                     break
         if all_keys:
-            print(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
+            logger.info(f"Found {len(all_keys)} backed up messages in Redis, recovering...")
             recovered_count = 0
 
             # Process each backed up message using our existing channel
@@ -147,7 +150,7 @@ class CachedMessageIterator:
                         await message.ack()
                         yield message
                     except ChannelInvalidStateError as cise:
-                        print(f"Rabbitmq Invalid State: {cise}, redialing...")
+                        logger.error(f"Rabbitmq Invalid State: {cise}, redialing...")
                         if self.config:
                             await publish_event(
                                 self.config,

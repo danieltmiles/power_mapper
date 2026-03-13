@@ -13,8 +13,11 @@ from httpx import ConnectError
 from sentence_transformers import SentenceTransformer
 
 import serialization
+from logger import get_logger
 from utils import load_config, dial_rabbit_from_config, get_answer
 from wire_formats import LLMPromptResponse
+
+logger = get_logger("scribe")
 
 SOLR_CORE = "topics"
 VECTOR_DIMENSION = 384  # all-MiniLM-L6-v2 output size
@@ -31,20 +34,20 @@ def extract_issue_summary(generated_text: str) -> dict | None:
     """
     raw_json = get_answer(generated_text, "```json", "```")
     if not raw_json:
-        print("Warning: no ```json block found in generated text")
+        logger.info("no ```json block found in generated text")
         return None
     try:
         parsed = json.loads(raw_json)
     except json.JSONDecodeError as json_error:
-        print(f"Warning: failed to parse extracted JSON: {json_error}")
-        print(f"Raw extracted text: {raw_json!r}")
+        logger.info(f"failed to parse extracted JSON: {json_error}")
+        logger.info(f"Raw extracted text: {raw_json!r}")
         return None
 
     issue_title = parsed.get("issue_title")
     description = parsed.get("description")
 
     if not issue_title:
-        print("Warning: issue_title missing from extracted JSON")
+        logger.info("issue_title missing from extracted JSON")
         return None
 
     return {"issue_title": issue_title, "description": description}
@@ -68,7 +71,7 @@ async def ensure_solr_core(solr_config: dict) -> None:
         vector_field_type_name = f"knn_vector_{VECTOR_DIMENSION}"
 
         if vector_field_type_name not in existing_type_names:
-            print(f"Adding field type '{vector_field_type_name}'...")
+            logger.info(f"Adding field type '{vector_field_type_name}'...")
             type_response = await client.post(
                 schema_url,
                 json={
@@ -81,9 +84,9 @@ async def ensure_solr_core(solr_config: dict) -> None:
                 },
             )
             type_response.raise_for_status()
-            print(f"Field type '{vector_field_type_name}' added")
+            logger.info(f"Field type '{vector_field_type_name}' added")
         else:
-            print(f"Field type '{vector_field_type_name}' already exists")
+            logger.info(f"Field type '{vector_field_type_name}' already exists")
 
         # Ensure document fields exist
         fields_to_add = [
@@ -102,15 +105,15 @@ async def ensure_solr_core(solr_config: dict) -> None:
             if field["name"] not in existing_field_names:
                 add_response = await client.post(schema_url, json={"add-field": field})
                 add_response.raise_for_status()
-                print(f"Added field: {field['name']} ({field['type']})")
+                logger.info(f"Added field: {field['name']} ({field['type']})")
                 fields_added += 1
             else:
-                print(f"Field already exists: {field['name']}")
+                logger.info(f"Field already exists: {field['name']}")
 
         if fields_added > 0:
-            print(f"Successfully added {fields_added} new fields to schema")
+            logger.info(f"Successfully added {fields_added} new fields to schema")
         else:
-            print("Schema is up to date - all required fields exist")
+            logger.info("Schema is up to date - all required fields exist")
 
 
 async def publish_topic_to_solr(
@@ -142,13 +145,13 @@ async def publish_topic_to_solr(
             except ConnectError:
                 tries += 1
                 if tries > 5:
-                    print("Too many errors talking to Solr, giving up")
+                    logger.error("Too many errors talking to Solr, giving up")
                     raise
-                print(f"ConnectError posting to Solr, retrying in {5 * tries}s...")
+                logger.error(f"ConnectError posting to Solr, retrying in {5 * tries}s...")
                 await asyncio.sleep(5 * tries)
 
         response.raise_for_status()
-        print(f"Published topic '{issue_summary['issue_title']}' to Solr")
+        logger.info(f"Published topic '{issue_summary['issue_title']}' to Solr")
 
 
 async def process_message(message, model: SentenceTransformer, config: dict) -> None:
@@ -158,22 +161,20 @@ async def process_message(message, model: SentenceTransformer, config: dict) -> 
         if issue_summary:
             await publish_topic_to_solr(issue_summary, prompt_response.filename, model, config["solr"])
         else:
-            print("Could not extract issue summary from response")
+            logger.info("Could not extract issue summary from response")
 
     except Exception as error:
-        print(f"Error processing message: {error}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error processing message: {error}", exc_info=True)
     finally:
         await message.ack()
 
 
 async def main(config: dict) -> None:
-    print("Initializing SCRIBE service...")
+    logger.info("Initializing SCRIBE service...")
 
-    print("Loading sentence transformer model...")
+    logger.info("Loading sentence transformer model...")
     model = SentenceTransformer("all-MiniLM-L6-v2")
-    print("Model loaded")
+    logger.info("Model loaded")
 
     await ensure_solr_core(config["solr"])
 
@@ -184,7 +185,7 @@ async def main(config: dict) -> None:
 
     while True:
         try:
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             retry_count = 0
 
@@ -193,8 +194,8 @@ async def main(config: dict) -> None:
                     await channel.set_qos(prefetch_count=1)
                     queue = await channel.declare_queue(config["work_queue"], durable=True)
 
-                    print(f"Listening for issue summaries on queue: {queue.name}")
-                    print("Waiting for messages. To exit press CTRL+C")
+                    logger.info(f"Listening for issue summaries on queue: {queue.name}")
+                    logger.info("Waiting for messages. To exit press CTRL+C")
 
                     async with queue.iterator() as queue_iter:
                         async for message in queue_iter:
@@ -203,30 +204,28 @@ async def main(config: dict) -> None:
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as connection_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
 
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {connection_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {connection_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
 
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
 
         except Exception as error:
-            print(f"Unexpected error in main loop: {error}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Unexpected error in main loop: {error}", exc_info=True)
 
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
 
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -245,11 +244,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

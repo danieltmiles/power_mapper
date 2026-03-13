@@ -9,9 +9,12 @@ import httpx
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 
 import serialization
+from logger import get_logger
 from sliding_window import SlidingWindow, SequencedText
 from utils import load_config, dial_rabbit_from_config
 from wire_formats import LLMPromptJob
+
+logger = get_logger("trac")
 
 MAX_PROMPT_SIZE = 10000
 PAGE_SIZE = 100
@@ -123,12 +126,12 @@ Rules:
                     work_queue = await work_channel.declare_queue(config["work_queue"], durable=True)
 
                     retry_count = 0
-                    print(f"Listening for filenames on queue: {config['work_queue']}")
+                    logger.info(f"Listening for filenames on queue: {config['work_queue']}")
                     async with work_queue.iterator() as queue_iter:
                         async for message in queue_iter:
                             async with message.process():
                                 filename = message.body.decode()
-                                print(f"Processing filename: {filename}")
+                                logger.info(f"Processing filename: {filename}")
                                 sliding_window = SlidingWindow(
                                     max_size=MAX_PROMPT_SIZE,
                                     callback=partial(sliding_window_callback, filename),
@@ -140,27 +143,25 @@ Rules:
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
 
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
 
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -179,11 +180,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

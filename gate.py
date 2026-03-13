@@ -11,8 +11,11 @@ from httpx import ConnectError
 
 import serialization
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from utils import load_config, create_ssl_context, get_answer, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config, publish_event
 from wire_formats import CleanedWhisperResult
+
+logger = get_logger("gate")
 
 async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, solr_config: dict) -> None:
     auth = httpx.BasicAuth(solr_config['username'], solr_config['password'])
@@ -46,15 +49,15 @@ async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, 
             except ConnectError:
                 tries += 1
                 if tries > 5:
-                    print("too many errors talking to solr, bailing")
+                    logger.error("too many errors talking to solr, bailing")
                     raise
-                print("caught ConnectError trying to send document to solr, sleeping 5, then retrying")
+                logger.error("caught ConnectError trying to send document to solr, sleeping 5, then retrying")
                 await asyncio.sleep(5 * tries)
 
         response.raise_for_status()
         result = response.json()
-        print(f"✓ Document published successfully!")
-        print(f"Response: {result}")
+        logger.info("Document published successfully!")
+        logger.info(f"Response: {result}")
 
 
 async def ensure_solr_schema(solr_config: dict) -> None:
@@ -88,9 +91,9 @@ async def ensure_solr_schema(solr_config: dict) -> None:
             response = await client.get(f"{schema_url}/fields")
             response.raise_for_status()
             existing_fields = {field['name'] for field in response.json().get('fields', [])}
-            print(f"Found {len(existing_fields)} existing fields in schema")
+            logger.info(f"Found {len(existing_fields)} existing fields in schema")
         except Exception as e:
-            print(f"Warning: Could not retrieve existing schema: {e}")
+            logger.info(f"Could not retrieve existing schema: {e}")
             existing_fields = set()
 
         # Add missing fields
@@ -103,17 +106,17 @@ async def ensure_solr_schema(solr_config: dict) -> None:
                         json={"add-field": field},
                     )
                     response.raise_for_status()
-                    print(f"Added field: {field['name']} ({field['type']})")
+                    logger.info(f"Added field: {field['name']} ({field['type']})")
                     fields_added += 1
                 except Exception as e:
-                    print(f"Warning: Could not add field {field['name']}: {e}")
+                    logger.info(f"Could not add field {field['name']}: {e}")
             else:
-                print(f"Field already exists: {field['name']}")
+                logger.info(f"Field already exists: {field['name']}")
 
         if fields_added > 0:
-            print(f"Successfully added {fields_added} new fields to schema")
+            logger.info(f"Successfully added {fields_added} new fields to schema")
         else:
-            print("Schema is up to date - all required fields exist")
+            logger.info("Schema is up to date - all required fields exist")
 
 
 async def process_message(
@@ -127,14 +130,14 @@ async def process_message(
     start = time.time()
     similarity_score = SimilarityCalculator().text_similarity(original_text, cleaned_text)
     end = time.time()
-    print(f"calculated similarity score in {end-start} seconds")
+    logger.info(f"calculated similarity score in {end-start} seconds")
     
     filename = cleaned_whisper_result.whisper_result.transcript_metadata.filename
     sequence_number = cleaned_whisper_result.whisper_result.segment_count
     total_segments = cleaned_whisper_result.whisper_result.total_segments
 
     if similarity_score <= 0.7:
-        print("rejected")
+        logger.info("rejected")
         cleaned_whisper_result.whisper_result.tries += 1
         tries = cleaned_whisper_result.whisper_result.tries
         max_retries = config.get("max_retries", 3)
@@ -164,7 +167,7 @@ async def process_message(
                 f"Segment DROPPED - will not appear in final output."
             )
     else:
-        print("accepted")
+        logger.info("accepted")
         # Dial fresh connection for publishing acceptance
         async with await dial_rabbit_from_config(config) as rabbitmq_connection:
             async with await rabbitmq_connection.channel() as channel:
@@ -182,7 +185,7 @@ async def main(config):
     Main function to start the RabbitMQ consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.
     """
-    print("Initializing RabbitMQ consumer...")
+    logger.info("Initializing RabbitMQ consumer...")
     
     # Retry configuration
     max_retries = 10
@@ -195,7 +198,7 @@ async def main(config):
     
     while True:
         try:
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             redis_client = await dial_redis_from_config(config)
             
@@ -210,8 +213,8 @@ async def main(config):
                         channel.declare_queue(config["accepted_queue"], durable=True,)
                     )
 
-                print(f"Successfully connected! Listening for jobs on queue: {config['work_queue']}")
-                print("Waiting for messages. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for jobs on queue: {config['work_queue']}")
+                logger.info("Waiting for messages. To exit press CTRL+C")
 
                 # Start consuming messages
                 async with CachedMessageIterator(
@@ -228,17 +231,16 @@ async def main(config):
         except (Exception,) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
-            # Calculate exponential backoff delay
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
 
 if __name__ == "__main__":
@@ -254,12 +256,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
 
     try:
         asyncio.run(main(config))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")

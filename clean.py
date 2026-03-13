@@ -11,8 +11,11 @@ from transformers import AutoTokenizer, Qwen2Tokenizer
 
 import serialization
 from cached_iterator import CachedMessageIterator
+from logger import get_logger
 from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import WhisperResult, LLMPromptJob, LLMPromptResponse, Metaparams, CleanedWhisperResult
+
+logger = get_logger("clean")
 
 
 def create_cleanup_prompt(text: str) -> str:
@@ -115,7 +118,7 @@ async def process_message(
     """
     Process an LLM cleanup job message from RabbitMQ.
     """
-    print(f"Received message")
+    logger.info("Received message")
     whisper_result: WhisperResult = serialization.load(message.body.decode())
 
     # Normal segment processing
@@ -123,11 +126,11 @@ async def process_message(
     total_segments = whisper_result.total_segments
     text = whisper_result.transcript.get("text", "")
 
-    print(f"Processing job, segment {segment_count}/{total_segments}")
-    print(f"length of transcript text: {len(text)}")
+    logger.info(f"Processing job, segment {segment_count}/{total_segments}")
+    logger.info(f"length of transcript text: {len(text)}")
 
     if len(text) < 50:
-        print(f"Transcript text is very short, skipping cleanup and sending original text")
+        logger.info("Transcript text is very short, skipping cleanup and sending original text")
         cleaned_text = text
     else:
         # Create prompt and send to LLM queue - dial fresh connection for this
@@ -140,17 +143,17 @@ async def process_message(
             )
 
             if generated is None:
-                print(f"Error: No response from LLM queue for segment {segment_count}")
+                logger.error(f"No response from LLM queue for segment {segment_count}")
                 return
 
-            print(f"generated: {generated}")
+            logger.info(f"generated: {generated}")
 
             cleaned_text = get_answer(generated, "```corrected_transcript", "```")
 
     if cleaned_text:
-        print(f"cleaned_text={cleaned_text}")
+        logger.info(f"cleaned_text={cleaned_text}")
     else:
-        print(f"Warning: Could not extract cleaned text, using original")
+        logger.info("Could not extract cleaned text, using original")
         cleaned_text = text
 
     # Prepare response and publish with fresh connection
@@ -165,7 +168,7 @@ async def process_message(
                 routing_key=results_queue,
             )
 
-    print(f"segment {segment_count} completed and response sent to {results_queue}")
+    logger.info(f"segment {segment_count} completed and response sent to {results_queue}")
 
 
 async def main(config, concurrent: int = 3):
@@ -177,8 +180,8 @@ async def main(config, concurrent: int = 3):
         config: Configuration dictionary
         concurrent: Number of concurrent message processors
     """
-    print("Initializing LLM cleanup consumer...")
-    print(f"Concurrent processors: {concurrent}")
+    logger.info("Initializing LLM cleanup consumer...")
+    logger.info(f"Concurrent processors: {concurrent}")
     
     # Retry configuration
     max_retries = 10
@@ -190,7 +193,7 @@ async def main(config, concurrent: int = 3):
     while True:
         try:
             # Connect to RabbitMQ with TLS
-            print(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
+            logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
             redis_client = await dial_redis_from_config(config)
             
@@ -207,8 +210,8 @@ async def main(config, concurrent: int = 3):
                         channel.declare_queue(results_queue, durable=True),
                     )
                 
-                print(f"Successfully connected! Listening for LLM cleanup jobs on queue: {work_queue}")
-                print("Waiting for cleanup jobs. To exit press CTRL+C")
+                logger.info(f"Successfully connected! Listening for LLM cleanup jobs on queue: {work_queue}")
+                logger.info("Waiting for cleanup jobs. To exit press CTRL+C")
                 
                 # Track active processing tasks
                 active_tasks = set()
@@ -246,30 +249,27 @@ async def main(config, concurrent: int = 3):
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as conn_error:
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
-            # Calculate exponential backoff delay
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Connection error: {conn_error}")
-            print(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
+            logger.error(f"Connection error: {conn_error}")
+            logger.info(f"Reconnection attempt {retry_count}/{max_retries} in {delay} seconds...")
             await asyncio.sleep(delay)
-            
+
         except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
+            logger.info("Shutting down gracefully...")
             break
         except Exception as e:
-            print(f"Unexpected error in main loop: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.error(f"Unexpected error in main loop: {e}", exc_info=True)
+
             retry_count += 1
             if retry_count > max_retries:
-                print(f"Max retries ({max_retries}) exceeded. Giving up.")
+                logger.error(f"Max retries ({max_retries}) exceeded. Giving up.")
                 raise
-            
+
             delay = min(base_retry_delay * (2 ** (retry_count - 1)), max_retry_delay)
-            print(f"Retrying in {delay} seconds...")
+            logger.info(f"Retrying in {delay} seconds...")
             await asyncio.sleep(delay)
 
 
@@ -310,15 +310,14 @@ instead of loading its own model.
     # Load configuration from file
     config = load_config(args.config_file)
 
-    print(f"Loaded configuration from: {args.config_file}")
-    print(f"Work queue: {config['work_queue']}")
-    print(f"Results queue: {config.get('results_queue', 'clean/results')}")
-    print(f"RabbitMQ host: {config['host']}:{config['port']}")
-    print(f"Username: {config['username']}")
-    print(f"Note: Sending prompts to llm/qwen32 queue for processing")
+    logger.info(f"Loaded configuration from: {args.config_file}")
+    logger.info(f"Work queue: {config['work_queue']}")
+    logger.info(f"Results queue: {config.get('results_queue', 'clean/results')}")
+    logger.info(f"RabbitMQ host: {config['host']}:{config['port']}")
+    logger.info(f"Username: {config['username']}")
+    logger.info("Note: Sending prompts to llm/qwen32 queue for processing")
 
-    # Run main with config
     try:
         asyncio.run(main(config, args.concurrent))
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        logger.info("Interrupted by user")
