@@ -120,6 +120,12 @@ def find_begin_thinking_token(tokenizer) -> str | None:
         lowered = token.lower()
         if "think" in lowered and "/think" not in lowered and "end_think" not in lowered:
             return token
+    if hasattr(tokenizer, "added_tokens_encoder"):
+        for token in tokenizer.added_tokens_encoder.keys():
+            lowered = token.lower()
+            if "think" in lowered and "/think" not in lowered and "end_think" not in lowered:
+                return token
+
     return None
 
 
@@ -132,6 +138,11 @@ def find_end_thinking_token(tokenizer) -> str | None:
         lowered = token.lower()
         if "/think" in lowered or "end_think" in lowered:
             return token
+    if hasattr(tokenizer, "added_tokens_encoder"):
+        for token in tokenizer.added_tokens_encoder.keys():
+            lowered = token.lower()
+            if "/think" in lowered or "end_think" in lowered:
+                return token
     return None
 
 
