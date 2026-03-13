@@ -12,7 +12,7 @@ import serialization
 import wire_formats
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
+from utils import load_config, get_answer, dial_rabbit_from_config, dial_redis_from_config
 
 logger = get_logger("name_consumer")
 

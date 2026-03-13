@@ -4,11 +4,10 @@ import pytest
 from pytest_mock import MockerFixture
 from typing import Any
 
-import serialization
 from message_generator import generate_messages
 from name_producer import SpeakerIdentificationProducer
 from sliding_window import CleanedWhisperResultWrapper, SlidingWindow
-from wire_formats import CleanedWhisperResult, LLMPromptJob
+from wire_formats import CleanedWhisperResult
 
 
 @pytest.fixture

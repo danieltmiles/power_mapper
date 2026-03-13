@@ -3,7 +3,7 @@
 Comprehensive tests for the relationship parser.
 """
 
-from relationship_parser import RelationshipParser, Relationship
+from relationship_parser import RelationshipParser
 
 
 def test_basic_parsing():

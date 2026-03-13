@@ -1,18 +1,15 @@
-import json
-import uuid
-import aio_pika
 import argparse
 import asyncio
+import uuid
 
+import aio_pika
 from aio_pika.abc import AbstractIncomingMessage, AbstractRobustConnection
 from aiormq import AMQPError, ChannelInvalidStateError, ChannelClosed
-from pamqp.commands import Basic
-from transformers import AutoTokenizer, Qwen2Tokenizer
 
 import serialization
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import load_config, create_ssl_context, get_answer, dial_rabbit_from_config, dial_redis_from_config
+from utils import load_config, get_answer, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import WhisperResult, LLMPromptJob, LLMPromptResponse, Metaparams, CleanedWhisperResult
 
 logger = get_logger("clean")

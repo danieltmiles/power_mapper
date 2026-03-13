@@ -1,12 +1,11 @@
 import hashlib
-import pickle
 from asyncio import Semaphore
 from contextlib import asynccontextmanager
-from typing import Protocol, Iterator, Any
+from typing import Iterator, Any
 
 import aiormq
 import redis.asyncio as redis
-from aio_pika.abc import AbstractRobustConnection, AbstractIncomingMessage, AbstractChannel
+from aio_pika.abc import AbstractRobustConnection, AbstractIncomingMessage
 from aiormq import ChannelInvalidStateError
 
 from logger import get_logger

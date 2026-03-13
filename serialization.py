@@ -1,4 +1,3 @@
-from dataclasses import asdict
 from typing import Protocol, Any, Literal
 import json
 import importlib

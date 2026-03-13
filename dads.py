@@ -1,4 +1,3 @@
-import json
 import pickle
 import base64
 from pathlib import Path
@@ -12,7 +11,7 @@ import asyncio
 
 
 import pyannote.audio
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, AbstractRobustConnection
+from aio_pika.abc import AbstractIncomingMessage
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 from pyannote.audio.tasks import SpeakerDiarization
 
@@ -27,10 +26,8 @@ torch.serialization.add_safe_globals([pyannote.audio.core.task.Specifications])
 torch.serialization.safe_globals([pyannote.audio.core.task.Problem])
 torch.serialization.add_safe_globals([pyannote.audio.core.task.Problem])
 torch.serialization.add_safe_globals([pyannote.audio.core.task.Resolution])
-from pamqp.commands import Basic
 from pyannote.audio import Pipeline
 from pyannote.audio.pipelines.speaker_diarization import DiarizeOutput
-from pyannote.audio.core.task import Specifications
 
 import shared_disks
 from utils import normalize_audio, load_config, create_ssl_context, load_hf_token, dial_rabbit_from_config, \

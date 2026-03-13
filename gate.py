@@ -6,13 +6,13 @@ import argparse
 import httpx
 import asyncio
 
-from aio_pika.abc import AbstractIncomingMessage, AbstractRobustChannel, AbstractRobustExchange
+from aio_pika.abc import AbstractIncomingMessage
 from httpx import ConnectError
 
 import serialization
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import load_config, create_ssl_context, get_answer, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config, publish_event
+from utils import load_config, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config, publish_event
 from wire_formats import CleanedWhisperResult
 
 logger = get_logger("gate")

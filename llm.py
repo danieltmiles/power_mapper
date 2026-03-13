@@ -42,7 +42,6 @@ Response format (JSON):
 }
 """
 import json
-import platform
 import time
 
 import aio_pika
@@ -52,14 +51,12 @@ import asyncio
 
 from aio_pika.abc import AbstractIncomingMessage
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
-from pamqp.commands import Basic
-from sympy.physics.units import temperature
 
 import serialization
 import wire_formats
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import load_config, create_ssl_context, load_quantized_llm_model, quantized_generate_from_prompt, dial_rabbit_from_config, dial_redis_from_config
+from utils import load_config, load_quantized_llm_model, quantized_generate_from_prompt, dial_rabbit_from_config, dial_redis_from_config
 from wire_formats import LLMPromptJob, Metaparams
 
 logger = get_logger("llm")

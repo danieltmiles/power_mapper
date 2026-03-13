@@ -1,9 +1,6 @@
 import datetime
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from typing import Protocol, Any
-
-import serialization
-from serialization import dumps, load
 
 
 class Dictable(Protocol):

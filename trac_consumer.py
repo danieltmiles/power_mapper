@@ -1,7 +1,6 @@
 # TRAC Consumer - Consumes messages from a queue using JSON config
 import asyncio
 import argparse
-import json
 import aio_pika
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 

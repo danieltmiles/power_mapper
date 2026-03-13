@@ -30,7 +30,7 @@ import serialization
 import shared_disks
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import diarized_segment_iter, assign_speaker_to_segment, normalize_audio, create_ssl_context
+from utils import diarized_segment_iter, normalize_audio, create_ssl_context
 from wire_formats import DiarizationResponse, WhisperJobDescription, WhisperJobAudioSegment
 
 logger = get_logger("slice")

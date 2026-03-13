@@ -588,13 +588,3 @@ async def test_no_callback_when_below_max_size_and_not_last_sequence():
     sliding_window = SlidingWindow(max_size=chunk_len + 1, callback=callback, truncation_percentage=0.0)
     await sliding_window.append(seg)
     assert len(fired) == 0
-
-# from llm, it should probably go in its own test file
-def test_tok():
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-32B")
-    from llm import find_begin_thinking_token, find_end_thinking_token
-    tok = find_begin_thinking_token(tokenizer)
-    print(tok)
-    tok = find_end_thinking_token(tokenizer)
-    print(tok)
