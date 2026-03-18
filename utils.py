@@ -307,7 +307,7 @@ def quantized_generate_from_prompt(
                 if 'choices' in chunk and len(chunk['choices']) > 0:
                     choice = chunk['choices'][0]
                     token_text = choice.get('text', '')
-                    logger.info(token_text)
+                    print(token_text, end='', flush=True)
                     generated_text += token_text
 
                     # Check for finish reason (None, 'stop', 'length')

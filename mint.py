@@ -117,12 +117,18 @@ async def process_message(
 ):
     """Process a single message"""
     try:
+        logger.info("process debug 1")
         # Dial a fresh connection for publishing
         async with await dial_rabbit_from_config(config) as rabbitmq_connection:
+            logger.info("process debug 2")
             resp: wire_formats.LLMPromptResponse = await get_transcript_metadata_from_llm(message, rabbitmq_connection, tokenizer)
+            logger.info("process debug 3")
             answer_str = get_answer(resp.generated_text, start_delim="```json", end_delim="```")
+            logger.info("process debug 4")
             try:
+                logger.info("process debug 6")
                 answer = wire_formats.TranscriptMetadata(**json.loads(answer_str))
+                logger.info("process debug 7")
             except TypeError:
                 logger.error(f"Failed to parse answer JSON: {answer_str}")
                 return
@@ -130,13 +136,16 @@ async def process_message(
                 logger.error(f"Invalid JSON format in answer: {answer_str}\nError: {jde}")
                 return
 
+            logger.info("process debug 8")
             async with await rabbitmq_connection.channel() as pub_channel:
+                logger.info("process debug 9")
                 await pub_channel.default_exchange.publish(
                     aio_pika.Message(
                         body=serialization.dumps(answer).encode("utf-8"),
                     ),
                     routing_key=result_queue,
                 )
+                logger.info("process debug 10")
     except Exception as e:
         logger.error(f"Error processing message: {e}", exc_info=True)
 
@@ -162,17 +171,23 @@ async def main(config):
         try:
             logger.info(f"Connecting to RabbitMQ at {config['host']}:{config['port']}...")
             connection = await dial_rabbit_from_config(config)
+            logger.info("debug 1")
             redis_client = await dial_redis_from_config(config)
-            
+            logger.info("debug 2")
+
             async with connection:
+                logger.info("debug 3")
                 async with await connection.channel() as channel:
+                    logger.info("debug 4")
                     # Declare the work queue
                     work_queue = config['work_queue']
                     result_queue = config["result_queue"]
+                    logger.info(f"debug 5 {work_queue=} {result_queue=}")
                     await asyncio.gather(
                         channel.declare_queue(work_queue, durable=True),
                         channel.declare_queue(result_queue, durable=True),
                     )
+                    logger.info("debug 6")
 
                 logger.info(f"Successfully connected! Listening for jobs on queue: {work_queue}")
                 logger.info("Waiting for messages. To exit press CTRL+C")
@@ -185,9 +200,13 @@ async def main(config):
                         redis_key_prefix="backup:mint",
                         config=config,
                 ) as queue_iter:
+                    logger.info("debug 7")
                     async for message in queue_iter:
+                        logger.info("debug 8")
                         async with queue_iter.processing(message):
+                            logger.info("debug 9")
                             await process_message(message, tokenizer, result_queue, config)
+                            logger.info("debug 10")
 
         except (Exception,) as conn_error:
             retry_count += 1

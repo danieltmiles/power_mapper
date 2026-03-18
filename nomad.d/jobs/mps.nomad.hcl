@@ -42,7 +42,7 @@ job "power-mapper-mps" {
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python llm.py ${NOMAD_TASK_DIR}/config.json",
+          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec caffeinate python llm.py ${NOMAD_TASK_DIR}/config.json",
         ]
       }
 
@@ -226,7 +226,7 @@ EOF
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python dads.py ${NOMAD_TASK_DIR}/config.json",
+          "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin && cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python dads.py ${NOMAD_TASK_DIR}/config.json",
         ]
       }
 
@@ -293,7 +293,7 @@ EOF
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python slice.py ${NOMAD_TASK_DIR}/config.json",
+          "export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin && cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python slice.py ${NOMAD_TASK_DIR}/config.json",
         ]
       }
 

@@ -62,6 +62,7 @@ def perform_transcription(audio_data, whisper_model, temperature=0.2, language='
     transcribe_params = {
         'temperature': temperature,
         'word_timestamps': word_timestamps,
+        'fp16': False,  # MPS doesn't support fp16; avoids NaN logits
     }
     
     if language:
@@ -288,7 +289,12 @@ Configuration file format (JSON):
     )
     
     args = parser.parse_args()
-    device_str = args.device or "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"{args=}")
+    logger.info(f"args.device = {args.device}")
+    device_str = args.device
+    if not device_str:
+        device_str = "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
+    logger.info(f"{device_str=}")
     device = torch.device(device_str)
     
     # Load configuration from file

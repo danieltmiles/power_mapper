@@ -4,7 +4,10 @@ import os
 import shutil
 from urllib.parse import urlparse
 
+from logger import get_logger
 from utils import find_smb_mount
+
+logger = get_logger("dads")
 
 
 class RemoteStorage(Protocol):
@@ -18,6 +21,7 @@ class WebDavRemoteStorage:
         self.webdav_base_uri = webdav_base_uri
         self.username = username
         self.passwd = passwd
+        logger.info("Initializing WebDavRemoteStorage with server: %s, username: %s, password_length %d", webdav_base_uri, username, len(passwd))
         self.client = Client({
             'webdav_hostname': webdav_base_uri,
             'webdav_login': username,

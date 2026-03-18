@@ -164,10 +164,8 @@ class CachedMessageIterator:
 
     @asynccontextmanager
     async def processing(self, message: AbstractIncomingMessage):
-        try:
-            yield message
-        finally:
-            await self.mark_processed(message)
+        yield message
+        await self.mark_processed(message)
 
     async def mark_processed(self, message: AbstractIncomingMessage):
         await self.redis_client.delete(self._get_redis_key(message))

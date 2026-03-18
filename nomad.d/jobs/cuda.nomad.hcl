@@ -7,11 +7,11 @@
 # Submit: nomad job run nomad.d/jobs/cuda.nomad.hcl
 #
 # Secrets — populate once per cluster:
-nomad var put nomad/jobs/power-mapper \
-  rabbitmq_password=... \
-  solr_password=... \
-  webdav_password=... \
-  model_path=/path/to/Qwen3-32B-Q4_K_M.gguf
+#   nomad var put nomad/jobs/power-mapper \
+#     rabbitmq_password=... \
+#     solr_password=... \
+#     webdav_password=... \
+#     model_path_cuda=/mnt/bfd/models/Qwen3-32B-Q4_K_M.gguf
 
 job "power-mapper-cuda" {
   datacenters = ["dc1"]
@@ -42,7 +42,7 @@ job "power-mapper-cuda" {
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /opt/power_mapper && source venv/bin/activate && exec python llm.py ${NOMAD_TASK_DIR}/config.json",
+          "cd /home/dmiles/power_mapper && source venv/bin/activate && exec python llm.py ${NOMAD_TASK_DIR}/config.json",
         ]
       }
 
@@ -63,9 +63,9 @@ job "power-mapper-cuda" {
     "host":         "doodledome.org",
     "port":         6380,
     "ssl":          true,
-    "ssl_ca_certs": "/opt/power_mapper/tls/ca.crt",
-    "ssl_certfile": "/opt/power_mapper/tls/client.crt",
-    "ssl_keyfile":  "/opt/power_mapper/tls/client.key"
+    "ssl_ca_certs": "/home/dmiles/power_mapper/tls/ca.crt",
+    "ssl_certfile": "/home/dmiles/power_mapper/tls/client.crt",
+    "ssl_keyfile":  "/home/dmiles/power_mapper/tls/client.key"
   }
 }
 {{ end }}
@@ -104,7 +104,7 @@ EOF
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /opt/power_mapper && source venv/bin/activate && exec python whisper_transcription.py ${NOMAD_TASK_DIR}/config.json --device=cpu",
+          "cd /home/dmiles/power_mapper && source venv/bin/activate && exec python whisper_transcription.py ${NOMAD_TASK_DIR}/config.json --device=cpu",
         ]
       }
 
@@ -124,9 +124,9 @@ EOF
     "host":         "doodledome.org",
     "port":         6380,
     "ssl":          true,
-    "ssl_ca_certs": "/opt/power_mapper/tls/ca.crt",
-    "ssl_certfile": "/opt/power_mapper/tls/client.crt",
-    "ssl_keyfile":  "/opt/power_mapper/tls/client.key"
+    "ssl_ca_certs": "/home/dmiles/power_mapper/tls/ca.crt",
+    "ssl_certfile": "/home/dmiles/power_mapper/tls/client.crt",
+    "ssl_keyfile":  "/home/dmiles/power_mapper/tls/client.key"
   }
 }
 {{ end }}
@@ -134,7 +134,7 @@ EOF
       }
 
       resources {
-        cpu    = 4000
+        cpu    = 10000
         memory = 5000
       }
 
