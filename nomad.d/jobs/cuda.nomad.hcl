@@ -11,7 +11,7 @@
 #     rabbitmq_password=... \
 #     solr_password=... \
 #     webdav_password=... \
-#     model_path_cuda=/mnt/bfd/models/Qwen3-32B-Q4_K_M.gguf
+#     model_path=/mnt/bfd/models/Qwen3-32B-Q4_K_M.gguf
 
 job "power-mapper-cuda" {
   datacenters = ["dc1"]
@@ -53,7 +53,7 @@ job "power-mapper-cuda" {
 {{ with nomadVar "nomad/jobs/power-mapper" }}
 {
   "work_queue":    "llm/qwen32",
-  "model_path":    "{{ .model_path_cuda }}",
+  "model_path":    "{{ .model_path }}",
   "hf_model_name": "Qwen/Qwen3-32B",
   "host":     "rabbitmq.doodledome.org",
   "port":     5671,
@@ -131,6 +131,11 @@ EOF
 }
 {{ end }}
 EOF
+      }
+
+      env {
+        OMP_NUM_THREADS = "4"
+        MKL_NUM_THREADS = "4"
       }
 
       resources {
