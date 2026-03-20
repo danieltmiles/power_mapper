@@ -93,7 +93,7 @@ async def process_message(message: AbstractIncomingMessage, config: dict):
     logger.info(f"Successfully updated speakers for {filename}")
     if sequence_number is not None and num_sequences is not None and sequence_number == num_sequences - 1:
         # last one — notify TRAC that this file is ready for topic extraction
-        async with dial_rabbit_from_config(config) as connection:
+        async with await dial_rabbit_from_config(config) as connection:
             async with await connection.channel() as channel:
                 await channel.declare_queue(config["destination_queue"], durable=True)
                 await channel.default_exchange.publish(
