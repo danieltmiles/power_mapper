@@ -2,8 +2,10 @@ import heapq
 import inspect
 from typing import Protocol, Callable
 
+from logger import get_logger
 from wire_formats import CleanedWhisperResult
 
+logger = get_logger("name_producer")
 
 class SequencedText(Protocol):
     speaker: str
@@ -62,6 +64,7 @@ class SlidingWindow:
                 self.window.append(heap_item)
                 self.next_sequence_number += 1  # advance before callback so truncation recalc is correct
                 prompt_text = self.prompt_text
+                logger.info(f"prompt text length {len(prompt_text)}/{self.max_size}")
                 if len(prompt_text) >= self.max_size or heap_item.sequence_number == heap_item.sequence_count - 1:
                     # Fire callback inside the drain loop so that a single append
                     # that releases many buffered items can trigger the callback

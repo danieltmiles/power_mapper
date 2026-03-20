@@ -140,8 +140,7 @@ async def process_message(
             )
 
             if generated is None:
-                logger.error(f"No response from LLM queue for segment {segment_count}")
-                return
+                raise RuntimeError(f"No response from LLM queue for segment {segment_count} — preserving Redis backup for replay")
 
             logger.info(f"generated: {generated}")
 
@@ -168,7 +167,7 @@ async def process_message(
     logger.info(f"segment {segment_count} completed and response sent to {results_queue}")
 
 
-async def main(config, concurrent: int = 3):
+async def main(config, concurrent: int = 5):
     """
     Main function to start the LLM cleanup consumer with reconnection logic.
     Handles connection failures and automatically reconnects with exponential backoff.

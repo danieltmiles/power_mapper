@@ -9,6 +9,7 @@ from typing import Any
 import aio_pika
 import argparse
 import asyncio
+import signal
 import redis.asyncio as redis
 
 from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel
@@ -241,6 +242,16 @@ class SpeakerIdentificationProducer:
         then process incoming speaker-identification jobs.
         """
         await self._connect_redis()
+
+        def log_heap_state():
+            if not self.sliding_windows_by_filename:
+                logger.info("SIGUSR1: no sliding windows active")
+                return
+            for filename, sliding_window in self.sliding_windows_by_filename.items():
+                sequence_numbers = [seq for seq, _ in sliding_window.heap]
+                logger.info(f"SIGUSR1: heap for {filename}: {sorted(sequence_numbers)}")
+
+        asyncio.get_event_loop().add_signal_handler(signal.SIGUSR1, log_heap_state)
 
         connection: AbstractRobustConnection = await aio_pika.connect_robust(
             host=self.config['host'],
