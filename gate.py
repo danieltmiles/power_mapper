@@ -1,3 +1,4 @@
+import datetime
 import time
 from typing import Any
 
@@ -12,18 +13,24 @@ from httpx import ConnectError
 import serialization
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import load_config, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config, publish_event
+from utils import load_config, SimilarityCalculator, dial_rabbit_from_config, dial_redis_from_config, publish_event, EmbeddingModel, ensure_solr_vector_field_type
 from wire_formats import CleanedWhisperResult
 
 logger = get_logger("gate")
 
 async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, solr_config: dict) -> None:
     auth = httpx.BasicAuth(solr_config['username'], solr_config['password'])
+    transcript_filename_date = cleaned_result.whisper_result.transcript_metadata.date
+    if transcript_filename_date:
+        date = transcript_filename_date.isoformat()
+    else:
+        date = "2006-01-02T15:04:05+00:00"
+    vector = EmbeddingModel().encode(cleaned_result.cleaned_transcript)
     document = {
         "filename": cleaned_result.whisper_result.transcript_metadata.filename,
         "meeting_title": cleaned_result.whisper_result.transcript_metadata.meeting_title,
         "session_type": cleaned_result.whisper_result.transcript_metadata.session_type,
-        "date": cleaned_result.whisper_result.transcript_metadata.date.isoformat(),
+        "date": date,
         "video_id": cleaned_result.whisper_result.transcript_metadata.video_id,
         "sequence_number": cleaned_result.whisper_result.segment_count,
         "count": cleaned_result.whisper_result.total_segments,
@@ -32,6 +39,7 @@ async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, 
         "speaker_name": cleaned_result.whisper_result.speaker,
         "text": cleaned_result.cleaned_transcript,
         "cleaned_whisper_result": serialization.dumps(cleaned_result, minify=True),
+        "vector_qwen": vector,
     }
     base_url = solr_config['url'].rstrip('/')
     collection = "transcripts"
@@ -63,29 +71,31 @@ async def publish_speaker_segment_to_solr(cleaned_result: CleanedWhisperResult, 
 async def ensure_solr_schema(solr_config: dict) -> None:
     """Ensure the Solr collection has the proper schema for transcript documents."""
 
-    # Construct schema API URL
     base_url = solr_config['url'].rstrip('/')
     auth = httpx.BasicAuth(solr_config['username'], solr_config['password'])
     collection = "transcripts"
     schema_url = f"{base_url}/{collection}/schema"
-    # Define the fields we need
-    fields_to_add = [
-        {"name": "filename", "type": "string", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "meeting_title", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "session_type", "type": "string", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "date", "type": "pdate", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "video_id", "type": "string", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "sequence_number", "type": "pint", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "count", "type": "pint", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "start_time", "type": "pfloat", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "end_time", "type": "pfloat", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "speaker_name", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "speaker_confidence", "type": "pint", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "text", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
-        {"name": "cleaned_whisper_result", "type": "text_general", "stored": True, "indexed": True, "multiValued": False},
-    ]
 
     async with httpx.AsyncClient(auth=auth, timeout=10) as client:
+        vector_field_type_name = await ensure_solr_vector_field_type(client, schema_url, EmbeddingModel().dimension)
+
+        fields_to_add = [
+            {"name": "filename",             "type": "string",                "stored": True, "indexed": True, "multiValued": False},
+            {"name": "meeting_title",        "type": "text_general",          "stored": True, "indexed": True, "multiValued": False},
+            {"name": "session_type",         "type": "string",                "stored": True, "indexed": True, "multiValued": False},
+            {"name": "date",                 "type": "pdate",                 "stored": True, "indexed": True, "multiValued": False},
+            {"name": "video_id",             "type": "string",                "stored": True, "indexed": True, "multiValued": False},
+            {"name": "sequence_number",      "type": "pint",                  "stored": True, "indexed": True, "multiValued": False},
+            {"name": "count",                "type": "pint",                  "stored": True, "indexed": True, "multiValued": False},
+            {"name": "start_time",           "type": "pfloat",                "stored": True, "indexed": True, "multiValued": False},
+            {"name": "end_time",             "type": "pfloat",                "stored": True, "indexed": True, "multiValued": False},
+            {"name": "speaker_name",         "type": "text_general",          "stored": True, "indexed": True, "multiValued": False},
+            {"name": "speaker_confidence",   "type": "pint",                  "stored": True, "indexed": True, "multiValued": False},
+            {"name": "text",                 "type": "text_general",          "stored": True, "indexed": True, "multiValued": False},
+            {"name": "cleaned_whisper_result","type": "text_general",         "stored": True, "indexed": True, "multiValued": False},
+            {"name": "vector_qwen",          "type": vector_field_type_name,  "stored": True, "indexed": True, "multiValued": False},
+        ]
+
         # Get existing schema fields
         try:
             response = await client.get(f"{schema_url}/fields")
@@ -101,10 +111,7 @@ async def ensure_solr_schema(solr_config: dict) -> None:
         for field in fields_to_add:
             if field['name'] not in existing_fields:
                 try:
-                    response = await client.post(
-                        f"{schema_url}",
-                        json={"add-field": field},
-                    )
+                    response = await client.post(f"{schema_url}", json={"add-field": field})
                     response.raise_for_status()
                     logger.info(f"Added field: {field['name']} ({field['type']})")
                     fields_added += 1
@@ -124,7 +131,10 @@ async def process_message(
     config: dict[str, Any],
 ):
     # Parse the incoming message
-    cleaned_whisper_result: CleanedWhisperResult = serialization.load(message.body.decode())
+    bodystr = message.body.decode()
+    logger.info(f"Received message with body: {bodystr}")
+    cleaned_whisper_result: CleanedWhisperResult = serialization.load(bodystr)
+    logger.info(f"Parsed CleanedWhisperResult: {cleaned_whisper_result}")
     original_text = cleaned_whisper_result.whisper_result.transcript.get("text", "")
     cleaned_text = cleaned_whisper_result.cleaned_transcript
     start = time.time()
@@ -186,12 +196,14 @@ async def main(config):
     Handles connection failures and automatically reconnects with exponential backoff.
     """
     logger.info("Initializing RabbitMQ consumer...")
-    
+
+    EmbeddingModel().init(config["embedding_model_path"])
+
     # Retry configuration
     max_retries = 10
     base_retry_delay = 2  # seconds
     max_retry_delay = 60  # seconds
-    
+
     await ensure_solr_schema(config["solr"])
     
     retry_count = 0

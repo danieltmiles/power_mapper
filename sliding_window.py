@@ -27,7 +27,7 @@ class CleanedWhisperResultWrapper(SequencedText):
         self.cleaned_whisper_result = cleaned_result
 
 class SlidingWindow:
-    def __init__(self, max_size: int, callback: Callable, truncation_percentage: float = 0.3):
+    def __init__(self, max_size: int, callback: Callable, truncation_percentage: float = 0.3, filename: str | None = None):
         self.max_size = max_size
         self.callback = callback
         self.heap: list[SequencedText] = []
@@ -40,6 +40,7 @@ class SlidingWindow:
         # survives across append() calls even when the window is empty (e.g.
         # after a full truncation).
         self.next_sequence_number: int = 0
+        self.filename: str | None = filename
 
     async def append(self, sequenced_text: SequencedText | CleanedWhisperResult):
         if isinstance(sequenced_text, CleanedWhisperResult):
@@ -47,6 +48,10 @@ class SlidingWindow:
         else:
             item = sequenced_text
         heapq.heappush(self.heap, (item.sequence_number, item))
+        seq_nums = sorted(x[0] for x in self.heap)
+        filename = self.filename + " " if self.filename else ""
+        logger.info(f"{filename}{seq_nums}")
+        logger.info(f"{filename}{self.next_sequence_number=}")
         # Sync next_sequence_number with the window tail if the window is
         # non-empty.  This handles cases where items were inserted into
         # self.window directly (e.g. test setup) or after a partial truncation

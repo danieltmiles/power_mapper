@@ -1,4 +1,5 @@
 import asyncio
+import io
 import os
 import re
 import subprocess
@@ -7,6 +8,7 @@ import json
 import ssl
 import tempfile
 from dataclasses import dataclass
+
 # from difflib import SequenceMatcher
 from typing import Optional
 from urllib.parse import urlparse
@@ -193,7 +195,8 @@ def load_config(config_file):
 
 
 def create_ssl_context(cert_file='server_certificate.pem', verify=True):
-    ssl_context = ssl.create_default_context(cafile=cert_file)
+    cafile = cert_file if cert_file and os.path.exists(cert_file) else None
+    ssl_context = ssl.create_default_context(cafile=cafile)
     if not verify:
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -228,6 +231,8 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
             model_path=model_path,
             n_gpu_layers=-1,  # Use all GPU layers
             n_ctx=10240,  # Context window size
+            use_mmap=True,   # Map the model file into memory rather than copying it
+            use_mlock=False, # Don't pin pages — let the OS page out unused weights
             verbose=False
         )
         tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
@@ -555,6 +560,104 @@ class SimilarityCalculator:
         return 0.5 * simple_sim + 0.5 * jaccard_sim + 2 * semantic_sim / 3
 
 
+VECTOR_DIMENSION = 384  # all-MiniLM-L6-v2 output size (used by SimilarityCalculator / scribe)
+
+
+def encode_text_to_vector(text: str) -> list[float]:
+    return SimilarityCalculator().model.encode(text).tolist()
+
+
+def encode_texts_to_vectors(texts: list[str]) -> list[list[float]]:
+    """Encode multiple texts in a single batched inference pass.
+
+    Prefer this over calling encode_text_to_vector in a loop — the model
+    processes the whole list as one matrix operation, which is significantly
+    faster than N individual calls on both CPU and GPU.
+    """
+    return SimilarityCalculator().model.encode(texts).tolist()
+
+
+class EmbeddingModel:
+    """Singleton llama_cpp model loaded in embedding mode.
+
+    Call EmbeddingModel().init(model_path) once at startup before use.
+    """
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._model = None
+            cls._instance.dimension = None
+        return cls._instance
+
+    def init(self, model_path: str, n_ctx: int = 2048, n_gpu_layers: int = -1) -> None:
+        if self._model is not None:
+            return
+        import llama_cpp
+        logger.info(f"Loading embedding model from {model_path}...")
+        self._model = llama_cpp.Llama(
+            model_path=model_path,
+            embedding=True,
+            pooling_type=llama_cpp.LLAMA_POOLING_TYPE_LAST,
+            n_ctx=n_ctx,
+            n_gpu_layers=n_gpu_layers,
+            use_mmap=True,
+            use_mlock=False,
+            verbose=False,
+        )
+        # Derive the output dimension from a live test rather than hardcoding.
+        self.dimension = len(self._model.embed("test"))
+        logger.info(f"Embedding model loaded (dimension={self.dimension})")
+
+    def encode(self, text: str) -> list[float]:
+        return self._model.embed(text)
+
+    def encode_batch(self, texts: list[str]) -> list[list[float]]:
+        # llama_cpp serialises embedding sequences one at a time internally, so
+        # passing a list batches all tokens into a single decode call and blows
+        # past n_ctx for any non-trivial batch size.  A plain loop is equivalent
+        # in throughput and avoids the context overflow.
+        old_stderr = sys.stderr
+        try:
+            sys.stderr = io.StringIO()
+            return [self._model.embed(text) for text in texts]
+        finally:
+            sys.stderr = old_stderr
+
+
+async def ensure_solr_vector_field_type(client, schema_url: str, dimension: int = VECTOR_DIMENSION) -> str:
+    """Ensure the knn_vector field type exists in the Solr schema.
+
+    Returns the field type name so callers can reference it when defining fields.
+    Pass `dimension` explicitly when using a model other than all-MiniLM-L6-v2.
+    """
+    field_types_response = await client.get(f"{schema_url}/fieldtypes")
+    field_types_response.raise_for_status()
+    existing_type_names = {ft["name"] for ft in field_types_response.json().get("fieldTypes", [])}
+    vector_field_type_name = f"knn_vector_{dimension}"
+
+    if vector_field_type_name not in existing_type_names:
+        logger.info(f"Adding field type '{vector_field_type_name}'...")
+        type_response = await client.post(
+            schema_url,
+            json={
+                "add-field-type": {
+                    "name": vector_field_type_name,
+                    "class": "solr.DenseVectorField",
+                    "vectorDimension": dimension,
+                    "similarityFunction": "cosine",
+                }
+            },
+        )
+        type_response.raise_for_status()
+        logger.info(f"Field type '{vector_field_type_name}' added")
+    else:
+        logger.info(f"Field type '{vector_field_type_name}' already exists")
+
+    return vector_field_type_name
+
+
 def load_hf_token(token_file="hf_token.txt"):
     """Load HuggingFace token from a file.
 
@@ -785,7 +888,7 @@ async def dial_rabbit_from_config(config: dict) -> AbstractRobustConnection:
         login=config['username'],
         password=config['password'],
         ssl=True,
-        ssl_context=create_ssl_context(),
+        ssl_context=create_ssl_context(config.get('ssl_cert_file', 'server_certificate.pem')),
         heartbeat=60,
     )
     logger.info("RabbitMQ connection established successfully")

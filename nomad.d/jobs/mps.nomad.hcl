@@ -360,7 +360,7 @@ EOF
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python clean.py ${NOMAD_TASK_DIR}/config.json",
+          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python clean.py --concurrent=5 ${NOMAD_TASK_DIR}/config.json",
         ]
       }
 
@@ -431,11 +431,12 @@ EOF
         data        = <<EOF
 {{ with nomadVar "nomad/jobs/power-mapper" }}
 {
-  "work_queue":     "cleaned-transcriptions",
-  "accepted_queue": "cleaned-transcriptions-accepted",
-  "retry_queue":    "transcriptions",
-  "max_tries":      3,
-  "hf_model_name":  "Qwen/Qwen3-32B",
+  "work_queue":            "cleaned-transcriptions",
+  "accepted_queue":        "cleaned-transcriptions-accepted",
+  "retry_queue":           "transcriptions",
+  "max_tries":             3,
+  "hf_model_name":         "Qwen/Qwen3-32B",
+  "embedding_model_path":  "/Users/dmiles/Qwen3-Embedding-8B-Q4_K_M.gguf",
   "host":     "rabbitmq.doodledome.org",
   "port":     5671,
   "username": "client",
@@ -765,7 +766,8 @@ EOF
         data        = <<EOF
 {{ with nomadVar "nomad/jobs/power-mapper" }}
 {
-  "work_queue": "issue-descriptions",
+  "work_queue":           "issue-descriptions",
+  "embedding_model_path": "/Users/dmiles/Qwen3-Embedding-8B-Q4_K_M.gguf",
   "host":     "rabbitmq.doodledome.org",
   "port":     5671,
   "username": "client",

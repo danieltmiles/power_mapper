@@ -30,6 +30,6 @@ def get_logger(service_name: str) -> logging.Logger:
         handler = logging.StreamHandler()
         handler.setFormatter(_RFC3339Formatter(f"%(asctime)s [{service_name}] %(levelname)s %(filename)s:%(lineno)d %(message)s", service_name))
         logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
         logger.propagate = False
     return logger

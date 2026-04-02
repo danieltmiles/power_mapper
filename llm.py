@@ -42,6 +42,9 @@ Response format (JSON):
 }
 """
 import json
+import os
+import signal
+import threading
 import time
 
 import aio_pika
@@ -60,6 +63,23 @@ from utils import load_config, load_quantized_llm_model, quantized_generate_from
 from wire_formats import LLMPromptJob, Metaparams
 
 logger = get_logger("llm")
+
+
+def watch_parent(ppid: int, interval: float = 5.0):
+    """Exit if our parent process disappears (e.g. menubar app crashed).
+
+    Runs in a daemon thread. Polls every `interval` seconds by sending
+    signal 0 to the original parent PID — harmless, but raises OSError
+    if the process no longer exists.
+    """
+    while True:
+        time.sleep(interval)
+        try:
+            os.kill(ppid, 0)
+        except OSError:
+            logger.warning("Parent process %d is gone — exiting", ppid)
+            os._exit(0)
+
 
 # Device detection - prioritize CUDA over MPS
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu"
@@ -370,6 +390,13 @@ Message format (JSON):
 
     args = parser.parse_args()
     config = load_config(args.config_file)
+
+    threading.Thread(
+        target=watch_parent,
+        args=(os.getppid(),),
+        daemon=True,
+        name="parent-watcher",
+    ).start()
 
     logger.info(f"Loaded configuration from: {args.config_file}")
     logger.info(f"Work queue: {config['work_queue']}")

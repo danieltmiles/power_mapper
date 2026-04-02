@@ -23,20 +23,26 @@ from wire_formats import CleanedWhisperResult, LLMPromptJob, Metaparams
 logger = get_logger("name_producer")
 
 MAX_PROMPT_TRANSCRIPT_LENGTH = 10000
-PROMPT_TEMPLATE = """The following is an excerpt from an automatically transcribed meeting:
+SYSTEM_PROMPT = (
+    "You are a transcript analyst who identifies anonymous speakers in public meetings. "
+    "You reason step-by-step from conversational evidence and always respond with valid JSON "
+    "— never with explanations, apologies, or filler text outside the JSON block."
+)
+USER_PROMPT_TEMPLATE = """The following is an excerpt from an automatically transcribed meeting:
 <transcript>
 {transcript}
 </transcript>
 
-The transcription software did not know who was speaking and assigned names like SPEAKER_1, SPEAKER_2, etc. Please infer speaker identities from context.
+The transcription software did not know who was speaking and assigned names like SPEAKER_1, SPEAKER_2, etc. Please infer speaker identities from context. The diarization was also flawed, meaning sometimes something at the start or end of a speaker's turn might actually have been from the speaker before or after.
 APPROACH:
-Reason through the clues step-by-step and Look for patterns.
+Reason through the clues step-by-step and look for patterns.
 
 CRITICAL RULES:
 1. Use full names when possible (e.g., "Joe Smith", "Mayor Jane Doe")
-2. NEVER output bare titles like "Moderator", "Chair", "Professor" - always include the person's name
-3. Output ONLY valid JSON, no markdown, no explanation
-4. Results of, Unknown, should have a confidence score of 1
+2. Use only the information in the transcript provided, do not use your own knowledge
+3. NEVER output bare titles like "Moderator", "Chair", "Professor" - always include the person's name
+4. Output ONLY valid JSON, no markdown, no explanation
+5. Results of Unknown should have a confidence score of 1
 
 KEY CLUES TO ANALYZE:
 - Direct Address: If Speaker_1 uses a person's name, like, "as my colleague John Smith will tell us," and Speaker_2 responds, Speaker_2 is likely John Smith.
@@ -114,6 +120,23 @@ class SpeakerIdentificationProducer:
         async with self.redis_semaphore:
             await self.redis_client.delete(key)
 
+    async def _set_recovery_sequence_number(self, filename: str, next_sequence_number: int):
+        """Persist the next sequence number to expect on recovery."""
+        if self.redis_client is None:
+            return
+        key = f"nameproducerbackup:{filename}::next_sequence_number"
+        async with self.redis_semaphore:
+            await self.redis_client.set(key, next_sequence_number)
+
+    async def _get_recovery_sequence_number(self, filename: str) -> int:
+        """Return the persisted recovery starting sequence number, or 0 if none."""
+        if self.redis_client is None:
+            return 0
+        key = f"nameproducerbackup:{filename}::next_sequence_number"
+        async with self.redis_semaphore:
+            value = await self.redis_client.get(key)
+        return int(value) if value is not None else 0
+
     async def _cleanup_filename_backups(self, filename: str):
         """Remove all backup messages for a completed filename."""
         if self.redis_client is None:
@@ -147,13 +170,21 @@ class SpeakerIdentificationProducer:
                 last_number = num
             logger.info(f"sending prompt with texts from sequence numbers: {sequence_numbers[0]}-{sequence_numbers[-1]}")
 
-            remove_coros = [self._remove_message_from_redis(filename, seq) for seq in sequence_numbers]
+            # Only remove items that will be truncated away after this callback.
+            # Items kept in the window tail for context in the next window must
+            # remain in Redis so they can be recovered after a crash.
+            to_lop = int(len(sliding_window.window) * sliding_window.truncation_percentage)
+            evicted_sequence_numbers = sequence_numbers[:to_lop]
+            remove_coros = [self._remove_message_from_redis(filename, seq) for seq in evicted_sequence_numbers]
             await asyncio.gather(*remove_coros, self.send(channel, filename, sequence_number, total_segments, prompt_text))
+
+            if evicted_sequence_numbers:
+                await self._set_recovery_sequence_number(filename, evicted_sequence_numbers[-1] + 1)
 
             if sequence_number == total_segments - 1:
                 await self._cleanup_filename_backups(filename)
 
-        return SlidingWindow(MAX_PROMPT_TRANSCRIPT_LENGTH, callback, truncation_percentage=0.3)
+        return SlidingWindow(MAX_PROMPT_TRANSCRIPT_LENGTH, callback, truncation_percentage=0.3, filename=filename)
 
     async def send(
         self,
@@ -167,7 +198,10 @@ class SpeakerIdentificationProducer:
             job_id=str(uuid.uuid4()),
             filename=filename,
             reply_to=self.config["reply_to"],
-            prompt=PROMPT_TEMPLATE.format(transcript=transcript_text.strip()),
+            prompt=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": USER_PROMPT_TEMPLATE.format(transcript=transcript_text.strip())},
+            ],
             meta_params=Metaparams(
                 temperature=0.2,
                 top_k=40,
@@ -230,6 +264,8 @@ class SpeakerIdentificationProducer:
             if filename not in self.sliding_windows_by_filename:
                 self.sliding_windows_by_filename[filename] = self._make_sliding_window_for(filename, channel)
             sliding_window = self.sliding_windows_by_filename[filename]
+            sliding_window.next_sequence_number = await self._get_recovery_sequence_number(filename)
+            logger.info(f"Recovery: starting {filename} from sequence {sliding_window.next_sequence_number}")
             for cleaned_whisper_result in sorted(results, key=lambda r: r.whisper_result.segment_count):
                 await sliding_window.append(cleaned_whisper_result)
                 recovered_count += 1

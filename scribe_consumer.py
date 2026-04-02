@@ -10,17 +10,15 @@ import json
 import httpx
 from aiormq import AMQPError, ChannelInvalidStateError, ChannelClosed
 from httpx import ConnectError
-from sentence_transformers import SentenceTransformer
 
 import serialization
 from logger import get_logger
-from utils import load_config, dial_rabbit_from_config, get_answer
+from utils import load_config, dial_rabbit_from_config, get_answer, EmbeddingModel, ensure_solr_vector_field_type
 from wire_formats import LLMPromptResponse
 
 logger = get_logger("scribe")
 
 SOLR_CORE = "topics"
-VECTOR_DIMENSION = 384  # all-MiniLM-L6-v2 output size
 
 
 def extract_issue_summary(generated_text: str) -> dict | None:
@@ -64,36 +62,14 @@ async def ensure_solr_core(solr_config: dict) -> None:
     async with httpx.AsyncClient(auth=auth, timeout=30) as client:
         schema_url = f"{base_url}/{SOLR_CORE}/schema"
 
-        # Ensure the dense vector field type exists
-        field_types_response = await client.get(f"{schema_url}/fieldtypes")
-        field_types_response.raise_for_status()
-        existing_type_names = {ft["name"] for ft in field_types_response.json().get("fieldTypes", [])}
-        vector_field_type_name = f"knn_vector_{VECTOR_DIMENSION}"
-
-        if vector_field_type_name not in existing_type_names:
-            logger.info(f"Adding field type '{vector_field_type_name}'...")
-            type_response = await client.post(
-                schema_url,
-                json={
-                    "add-field-type": {
-                        "name": vector_field_type_name,
-                        "class": "solr.DenseVectorField",
-                        "vectorDimension": VECTOR_DIMENSION,
-                        "similarityFunction": "cosine",
-                    }
-                },
-            )
-            type_response.raise_for_status()
-            logger.info(f"Field type '{vector_field_type_name}' added")
-        else:
-            logger.info(f"Field type '{vector_field_type_name}' already exists")
+        vector_field_type_name = await ensure_solr_vector_field_type(client, schema_url, EmbeddingModel().dimension)
 
         # Ensure document fields exist
         fields_to_add = [
             {"name": "title",           "type": "text_general",        "stored": True, "indexed": True,  "multiValued": False},
             {"name": "description",     "type": "text_general",        "stored": True, "indexed": True,  "multiValued": False},
             {"name": "source_filename", "type": "string",              "stored": True, "indexed": True,  "multiValued": False},
-            {"name": "vector",          "type": vector_field_type_name, "stored": True, "indexed": True, "multiValued": False},
+            {"name": "vector_qwen",     "type": vector_field_type_name, "stored": True, "indexed": True, "multiValued": False},
         ]
 
         existing_fields_response = await client.get(f"{schema_url}/fields")
@@ -119,17 +95,16 @@ async def ensure_solr_core(solr_config: dict) -> None:
 async def publish_topic_to_solr(
     issue_summary: dict,
     source_filename: str,
-    model: SentenceTransformer,
     solr_config: dict,
 ) -> None:
     text = issue_summary["description"]
-    vector = model.encode(text).tolist()
+    vector = EmbeddingModel().encode(text)
 
     document = {
         "title": issue_summary["issue_title"],
         "description": issue_summary["description"],
         "source_filename": source_filename,
-        "vector": vector,
+        "vector_qwen": vector,
     }
 
     base_url = solr_config["url"].rstrip("/")
@@ -154,12 +129,12 @@ async def publish_topic_to_solr(
         logger.info(f"Published topic '{issue_summary['issue_title']}' to Solr")
 
 
-async def process_message(message, model: SentenceTransformer, config: dict) -> None:
+async def process_message(message, config: dict) -> None:
     try:
         prompt_response: LLMPromptResponse = serialization.load(message.body.decode())
         issue_summary = extract_issue_summary(prompt_response.generated_text)
         if issue_summary:
-            await publish_topic_to_solr(issue_summary, prompt_response.filename, model, config["solr"])
+            await publish_topic_to_solr(issue_summary, prompt_response.filename, config["solr"])
         else:
             logger.info("Could not extract issue summary from response")
 
@@ -172,9 +147,9 @@ async def process_message(message, model: SentenceTransformer, config: dict) -> 
 async def main(config: dict) -> None:
     logger.info("Initializing SCRIBE service...")
 
-    logger.info("Loading sentence transformer model...")
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    logger.info("Model loaded")
+    logger.info("Loading embedding model...")
+    EmbeddingModel().init(config["embedding_model_path"])
+    logger.info("Embedding model loaded")
 
     await ensure_solr_core(config["solr"])
 
@@ -199,7 +174,7 @@ async def main(config: dict) -> None:
 
                     async with queue.iterator() as queue_iter:
                         async for message in queue_iter:
-                            await process_message(message, model, config)
+                            await process_message(message, config)
 
         except (AMQPError, ChannelInvalidStateError, ChannelClosed, ConnectionError) as connection_error:
             retry_count += 1

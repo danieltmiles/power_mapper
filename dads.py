@@ -14,6 +14,7 @@ import pyannote.audio
 from aio_pika.abc import AbstractIncomingMessage
 from aiormq import ChannelInvalidStateError, ChannelClosed, AMQPError
 from pyannote.audio.tasks import SpeakerDiarization
+from webdav3.exceptions import RemoteResourceNotFound
 
 import serialization
 from cached_iterator import CachedMessageIterator
@@ -95,7 +96,11 @@ async def process_message(
     )
     local_filename = f"/tmp/{transcript_metadata.filename}"
     logger.info("retrieving remote file")
-    remote_storage.retrieve(Path(transcript_metadata.filename).name, local_filename)
+    try:
+        remote_storage.retrieve(Path(transcript_metadata.filename).name, local_filename)
+    except RemoteResourceNotFound as rrnf:
+        logger.error(f"Remote file not found: {transcript_metadata.filename}. Continuing.")
+        return
     logger.info("retrieved remote file")
     signal, sr = normalize_audio(local_filename)
 

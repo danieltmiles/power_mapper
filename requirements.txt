@@ -1,4 +1,8 @@
 aio_pika
+aiohttp
+anyio
+httpx
+tqdm
 transformers
 torch
 torchaudio
@@ -17,4 +21,4 @@ pytest
 pytest-asyncio
 pytest-mock
 Faker
-behave
+behavetqdm
