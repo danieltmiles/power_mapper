@@ -6,3 +6,7 @@ pretrained_models
 *.pyc
 hf_token.txt
 *_config.json
+*.dmg
+build/
+dist/
+tls/
