@@ -15,7 +15,7 @@ from wire_formats import WhisperResult, LLMPromptJob, LLMPromptResponse, Metapar
 logger = get_logger("clean")
 
 
-def create_cleanup_prompt(text: str) -> str:
+def create_cleanup_prompt(text: str) -> list[dict[str, str]]:
     """
     Create a prompt for the journalistic courtesy (cleanup) task.
 
@@ -25,34 +25,43 @@ def create_cleanup_prompt(text: str) -> str:
     Returns:
         str: Formatted prompt for the LLM
     """
-    prompt_template = """<transcript_to_correct>
-{text}
-</transcript_to_correct>
-
-You are a transcript editor. Your job is to fix ASR (speech recognition) errors while preserving how people actually speak.
-
-PRESERVE these natural speech features:
-- False starts and self-corrections ("I think, uh, I mean...")
-- Filler words (um, uh, like, you know)
-- Repetitions for emphasis ("very very important")
-- Incomplete sentences and run-ons
-- Grammatical errors that occur in natural speech
-
-ONLY FIX these ASR errors:
-- Misheard words that don't make sense in context
-- Randomly inserted words that break sentence flow
-- Missing words that make sentences incomprehensible
-- Obvious word substitutions (homophones, similar-sounding words)
-
-Do not make the speech more formal or grammatically correct. The goal is an accurate transcript of what was said, not cleaned-up prose.
-
-Return ONLY the corrected transcript without explanations, stop when finished. End with a text block containing the corrected transcript, formatted like this:
-```corrected_transcript
-[corrected transcript here]
-```
-"""
     text = text.replace("...", "")
-    return prompt_template.format(text=text.strip())
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a transcript editor. Your job is to fix ASR (speech recognition) errors while preserving "
+                "how people actually speak. The following is some text produced by a speech recognition system:\n"
+                "<transcript_to_correct>\n"
+            ) + text + "\n</transcript_to_correct>\n\n"
+        },
+        {
+            "role": "user",
+            "content": (
+                "Please correct the text provided according to these rules:\n"
+                "PRESERVE these natural speech features:\n"
+                "- False starts and self-corrections (\"I think, uh, I mean...\")\n"
+                "- Filler words (um, uh, like, you know)\n"
+                "- Repetitions for emphasis (\"very very important\")\n"
+                "- Incomplete sentences and run-ons\n"
+                "- Grammatical errors that occur in natural speech\n"
+                "\n"
+                "ONLY FIX these ASR errors:\n"
+                "- Misheard words that don't make sense in context\n"
+                "- Randomly inserted words that break sentence flow\n"
+                "- Missing words that make sentences incomprehensible\n"
+                "- Obvious word substitutions (homophones, similar-sounding words)\n"
+                "\n"
+                "Do not make the speech more formal or grammatically correct. The goal is an accurate "
+                "transcript of what was said, not cleaned-up prose.\n"
+                "Return ONLY the corrected transcript without explanations, stop when finished. End with a "
+                "text block containing the corrected transcript, formatted like this:\n"
+                "```corrected_transcript\n"
+                "[corrected transcript here]\n"
+                "```\n"
+            )
+        },
+    ]
 
 async def send_to_llm_queue(
     connection: AbstractRobustConnection,

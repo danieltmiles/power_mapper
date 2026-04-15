@@ -13,6 +13,24 @@ from wire_formats import LLMPromptResponse, LLMPromptJob
 logger = get_logger("trac_consumer")
 
 
+def create_topic_description_prompt(system_message: dict, issue: str) -> list[dict]:
+    """Create a topic-description prompt for a given issue (scribe-style)."""
+    return [
+        system_message,
+        {
+            "role": "user",
+            "content": (
+                f"Another analyst identified an issue, `{issue}` from the given transcript section. "
+                "Using the provided transcript section please create as complete a description of the "
+                "issue as you can. If you cannot infer any additional details, simply use the given issue "
+                "text as the full description. Format your your response like so:\n```json\n{"
+                "\n    \"issue_title\": \"given issue title\",\n    \"description\": \"full description "
+                "posibly with multiple lines\"\n}\n```\n"
+            )
+        }
+    ]
+
+
 async def process_message(message, llm_channel, config):
     try:
         prompt_response: LLMPromptResponse = serialization.load(message.body.decode())
@@ -24,20 +42,7 @@ async def process_message(message, llm_channel, config):
                 job_id=prompt_response.job_id,
                 filename=prompt_response.filename,
                 reply_to=config["reply_to"],
-                prompt=[
-                    prompt_response.prompt[0],
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Another analyst identified an issue, `{issue}` from the given transcript section. "
-                            "Using the provided transcript section please create as complete a description of the "
-                            "issue as you can. If you cannot infer any additional details, simply use the given issue "
-                            "text as the full description. Format your your response like so:\n```json\n{"
-                            "\n    \"issue_title\": \"given issue title\",\n    \"description\": \"full description "
-                            "posibly with multiple lines\"\n}\n```\n"
-                        )
-                    }
-                ],
+                prompt=create_topic_description_prompt(prompt_response.prompt[0], issue),
                 request_id=prompt_response.request_id,
                 state=prompt_response.state,
             )

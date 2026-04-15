@@ -19,6 +19,32 @@ logger = get_logger("trac")
 MAX_PROMPT_SIZE = 10000
 PAGE_SIZE = 100
 
+
+def create_topic_prompt(transcript_section: str) -> list[dict]:
+    """Create a topic extraction prompt from a transcript section (trac-style)."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                f"You are a political analyst helping to extract information from city council "
+                f"meeting transcripts. Here a portion of a meeting transcript:\n"
+                f"<transcript>\n{transcript_section}\n</transcript>"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Extract all political issues as relationships in this exact format:\n"
+                "```graph\n"
+                "| Speaker -> Supports/Opposes -> Issue |\n"
+                "```\n\n"
+                "Rules:\n"
+                "- One relationship per line\n"
+                "- No additional explanation\n"
+            ),
+        },
+    ]
+
 class SolrDocumentWrapper(SequencedText):
     """Adapts a Solr transcript document to the SequencedText protocol."""
     def __init__(self, doc: dict):
@@ -75,24 +101,7 @@ async def main(config):
             async def sliding_window_callback(filename: str, window: str):
                 nonlocal llm_connection, llm_channel
                 window = window.strip()
-                conversation = [
-                    {
-                        "role": "system",
-                        "content": f"You are a political analyst helping to extract information from city council meeting transcripts. Here a portion of a meeting transcript:\n<transcript>\n{window}\n</transcript>",
-                    },
-                    {
-                        "role": "user",
-                        "content": """Extract all political issues as relationships in this exact format:
-```graph
-| Speaker -> Supports/Opposes -> Issue |
-```
-
-Rules:
-- One relationship per line
-- No additional explanation
-""",
-                    }
-                ]
+                conversation = create_topic_prompt(window)
                 job = LLMPromptJob(
                     job_id=str(uuid.uuid4()),
                     filename=filename,

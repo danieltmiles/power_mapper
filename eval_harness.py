@@ -35,6 +35,8 @@ import serialization
 from clean import create_cleanup_prompt
 from logger import get_logger
 from name_producer import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+from scribe import create_topic_description_prompt
+from trac import create_topic_prompt
 from sliding_window import SlidingWindow
 from utils import (
     load_quantized_llm_model,
@@ -255,9 +257,65 @@ async def load_prompts_from_transcriptions(
 
     logger.info(f"Generated {len(identification_jobs)} identification prompts from transcriptions")
 
-    jobs = cleanup_jobs + identification_jobs
+    # --- Topic prompts (trac.py style) ---
+    topic_jobs: list[PromptJob] = []
+
+    for filename, group in by_filename.items():
+        if len(topic_jobs) >= samples_per_type:
+            break
+
+        def on_topic_window_full(prompt_text: str, _fn=filename):
+            if len(topic_jobs) >= samples_per_type:
+                return
+            window_text = prompt_text.strip()
+            full_prompt = create_topic_prompt(window_text)
+            topic_jobs.append(PromptJob(
+                prompt=full_prompt,
+                meta_params={
+                    "temperature": 0.2,
+                    "top_k": 40,
+                    "repetition_penalty": 1.1,
+                },
+                encourage_thinking=True,
+                filename=_fn,
+            ))
+
+        window = SlidingWindow(
+            max_size=10000,
+            callback=on_topic_window_full,
+            truncation_percentage=0.3,
+            filename=filename,
+        )
+        for cr in group:
+            await window.append(cr)
+
+    logger.info(f"Generated {len(topic_jobs)} topic prompts from transcriptions")
+
+    # --- Topic-description prompts (scribe.py style) ---
+    topic_description_jobs: list[PromptJob] = []
+
+    for topic_job in topic_jobs:
+        if len(topic_description_jobs) >= samples_per_type:
+            break
+        issue_placeholder = "the identified issue"
+        full_prompt = create_topic_description_prompt(topic_job.prompt[0], issue_placeholder)
+        topic_description_jobs.append(PromptJob(
+            prompt=full_prompt,
+            meta_params={
+                "temperature": 0.2,
+                "top_k": 40,
+                "repetition_penalty": 1.1,
+            },
+            encourage_thinking=True,
+            filename=topic_job.filename,
+        ))
+
+    logger.info(f"Generated {len(topic_description_jobs)} topic-description prompts from transcriptions")
+
+    jobs = cleanup_jobs + identification_jobs + topic_jobs + topic_description_jobs
     logger.info(f"Total prompts from transcriptions: {len(jobs)} "
-                f"({len(cleanup_jobs)} cleanup + {len(identification_jobs)} identification)")
+                f"({len(cleanup_jobs)} cleanup + {len(identification_jobs)} identification + "
+                f"{len(topic_jobs)} topic + {len(topic_description_jobs)} topic-description)")
     return jobs
 
 
@@ -396,7 +454,7 @@ async def run_model_inference(
                 conversation = job.prompt
                 if conversation[0].get("role") == "system":
                     conversation[0]["content"] += (
-                        "\n\nYou know your output will be parsed by a computer program "
+                        "\nYou know your output will be parsed by a computer program "
                         "and that seemingly conflicting directives may support that goal. For example you "
                         "may be asked to output only valid json while also being asked to place start and "
                         "stop delimiters to help that JSON be identified, such as JSON_OUTPUT_START and "
@@ -404,7 +462,7 @@ async def run_model_inference(
                         "of making parsable output, and you may follow both directives."
                     )
                 text_prompt = apply_chat_template(conversation, tokenizer)
-
+            print(text_prompt)
             # Handle thinking tokens based on job's encourage_thinking flag
             begin_thinking_token = find_start_think_token(tokenizer)
             if begin_thinking_token:
