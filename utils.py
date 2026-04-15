@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import redis.asyncio as redis
 
 import aio_pika
+import torch.cuda
 from aio_pika.abc import AbstractRobustConnection
 from huggingface_hub.errors import RemoteEntryNotFoundError
 
@@ -203,8 +204,34 @@ def create_ssl_context(cert_file='server_certificate.pem', verify=True):
         ssl_context.verify_mode = ssl.CERT_NONE
     return ssl_context
 
+def get_available_video_memory() -> int:
+    import torch
+    if torch.cuda.is_available():
+        import nvidia_smi
+        try:
+            nvidia_smi.nvmlInit()
 
-def estimate_max_context(gguf_path: str, vram_bytes: int = 23 * 1024**3) -> int:
+            handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)
+            # card id 0 hardcoded here, there is also a call to get all available card ids, so we could iterate
+
+            info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+            logger.info(f"Total video memory: {info.total / 1024 ** 3}GB")
+            logger.info(f"Free video memory: {info.free / 1024 ** 3}GB")
+            logger.info(f"Used video memory: {info.used / 1024 ** 3}GB")
+            return info.free
+        finally:
+            nvidia_smi.nvmlShutdown()
+    elif torch.mps.is_available():
+        import psutil
+        meminfo = psutil.virtual_memory()
+        logger.info(f"Apple Silicon system memory available to GPU: {meminfo.available / 1024 ** 3}GB")
+        return meminfo.available
+    else:
+        logger.warning("No available VRAM detected. Assuming 23GB.")
+        return 23 * 1024 ** 3
+
+
+def estimate_max_context(gguf_path: str, vram_bytes: int = None) -> tuple[int, int]:
     """
     Examine a GGUF file, determine its memory requirements, and return the
     maximum context length (in tokens) that will fit in the given VRAM budget.
@@ -221,6 +248,9 @@ def estimate_max_context(gguf_path: str, vram_bytes: int = 23 * 1024**3) -> int:
     Returns:
         Maximum context length in tokens that fits within the VRAM budget.
     """
+
+    vram_bytes = vram_bytes or get_available_video_memory()
+
     from gguf import GGUFReader
 
     reader = GGUFReader(gguf_path)
@@ -266,13 +296,13 @@ def estimate_max_context(gguf_path: str, vram_bytes: int = 23 * 1024**3) -> int:
     cost_per_layer = (weight_bytes / n_layers) + (kv_per_token_per_layer * target_ctx)
     max_layers = min(int((vram_bytes - overhead_bytes) // cost_per_layer), n_layers)
     logger.info(
-        f"GGUF estimate for {os.path.basename(gguf_path)}:\n"
+        f"\nGGUF estimate for {os.path.basename(gguf_path)}:\n"
         f"weights={weight_bytes / 1024**3:.1f} GB,\n"
         f"weight bytes per layer={weight_bytes / n_layers / 1024**2:.1f} MB,\n"
         f"kv/token={kv_bytes_per_token} B,\n"
         f"max_context={max_ctx} tokens\n"
         f"max_layers={max_layers} layers\n"
-        f"(vram budget={vram_bytes / 1024**3:.0f} GB)\n"
+        f"(vram budget={vram_bytes / 1024**3:.0f} GB)"
     )
     return int(max_ctx), int(max_layers)
 
@@ -306,6 +336,8 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
             max_ctx = 10240
         else:
             max_layers = -1
+        max_ctx = min(10240, max_ctx)
+        logger.info(f"{max_layers=}, {max_ctx=}")
         model = Llama(
             model_path=model_path,
             n_gpu_layers=max_layers,  # Use all GPU layers
