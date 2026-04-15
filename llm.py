@@ -59,7 +59,7 @@ import serialization
 import wire_formats
 from cached_iterator import CachedMessageIterator
 from logger import get_logger
-from utils import load_config, load_quantized_llm_model, quantized_generate_from_prompt, dial_rabbit_from_config, dial_redis_from_config
+from utils import load_config, load_quantized_llm_model, quantized_generate_from_prompt, dial_rabbit_from_config, dial_redis_from_config, find_start_think_token, find_end_think_token
 from wire_formats import LLMPromptJob, Metaparams
 
 logger = get_logger("llm")
@@ -128,42 +128,18 @@ def generate_text(prompt: str, model, tokenizer, params: dict) -> str:
     return generated_text
 
 
-def find_begin_thinking_token(tokenizer) -> str | None:
+def should_add_generation_prompt(tokenizer) -> bool:
     """
-    Search the tokenizer's special tokens for an opening thinking token (e.g. <think>).
-    Returns the token string if found, or None if this model has no thinking token.
-
-    The heuristic: look for a special token whose text contains "think" but does NOT
-    look like a closing tag (i.e. does not contain "/" or "end" right before/after "think").
+    Determine if the model's chat template wants add_generation_prompt=True.
+    Qwen models want it True, Hermes models want it False.
     """
-    for token in getattr(tokenizer, "additional_special_tokens", []):
-        lowered = token.lower()
-        if "think" in lowered and "/think" not in lowered and "end_think" not in lowered:
-            return token
-    if hasattr(tokenizer, "added_tokens_encoder"):
-        for token in tokenizer.added_tokens_encoder.keys():
-            lowered = token.lower()
-            if "think" in lowered and "/think" not in lowered and "end_think" not in lowered:
-                return token
-
-    return None
-
-
-def find_end_thinking_token(tokenizer) -> str | None:
-    """
-    Search the tokenizer's special tokens for a closing thinking token (e.g. </think>).
-    Returns the token string if found, or None if this model has no thinking token.
-    """
-    for token in getattr(tokenizer, "additional_special_tokens", []):
-        lowered = token.lower()
-        if "/think" in lowered or "end_think" in lowered:
-            return token
-    if hasattr(tokenizer, "added_tokens_encoder"):
-        for token in tokenizer.added_tokens_encoder.keys():
-            lowered = token.lower()
-            if "/think" in lowered or "end_think" in lowered:
-                return token
-    return None
+    model_name = getattr(tokenizer, 'name_or_path', '')
+    if 'qwen' in model_name.lower():
+        return True
+    if 'hermes' in model_name.lower():
+        return False
+    # Default to True for unknown models (safer)
+    return True
 
 
 async def process_message(message: AbstractIncomingMessage, model, tokenizer, config: dict):
@@ -216,18 +192,20 @@ async def process_message(message: AbstractIncomingMessage, model, tokenizer, co
 
     if isinstance(job_desc.prompt, list):
         logger.info(f"Prompt is a conversation with {len(job_desc.prompt)} messages")
+        add_gen_prompt = should_add_generation_prompt(tokenizer)
+        logger.info(f"Using add_generation_prompt={add_gen_prompt}")
         text_prompt = tokenizer.apply_chat_template(
             job_desc.prompt,
             tokenize=False,
-            add_generation_prompt=True,
+            add_generation_prompt=add_gen_prompt,
         )
-        begin_thinking_token = find_begin_thinking_token(tokenizer)
+        begin_thinking_token = find_start_think_token(tokenizer)
         if begin_thinking_token:
             if job_desc.encourage_thinking:
                 logger.info(f"Encouraging thinking: appending {begin_thinking_token!r}")
                 text_prompt += begin_thinking_token + "\n"
             else:
-                end_thinking_token = find_end_thinking_token(tokenizer)
+                end_thinking_token = find_end_think_token(tokenizer)
                 logger.info(f"Suppressing thinking: appending {begin_thinking_token!r}{end_thinking_token!r}")
                 text_prompt += begin_thinking_token + (end_thinking_token or "") + "\n"
     else:

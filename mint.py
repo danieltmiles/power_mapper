@@ -122,7 +122,7 @@ async def process_message(
         async with await dial_rabbit_from_config(config) as rabbitmq_connection:
             logger.info("process debug 2")
             resp: wire_formats.LLMPromptResponse = await get_transcript_metadata_from_llm(message, rabbitmq_connection, tokenizer)
-            logger.info("process debug 3")
+            logger.info(f"process debug 3\n{resp.generated_text}")
             answer_str = get_answer(resp.generated_text, start_delim="```json", end_delim="```")
             logger.info("process debug 4")
             try:

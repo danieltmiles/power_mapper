@@ -1,6 +1,7 @@
 import pickle
 import base64
 from pathlib import Path
+from subprocess import CalledProcessError
 from typing import Any
 
 import aio_pika
@@ -102,7 +103,11 @@ async def process_message(
         logger.error(f"Remote file not found: {transcript_metadata.filename}. Continuing.")
         return
     logger.info("retrieved remote file")
-    signal, sr = normalize_audio(local_filename)
+    try:
+        signal, sr = normalize_audio(local_filename)
+    except CalledProcessError as cpe:
+        logger.error(cpe)
+        return
 
     # Move waveform to appropriate device
     if isinstance(signal, torch.Tensor):

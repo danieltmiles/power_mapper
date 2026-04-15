@@ -21,4 +21,3 @@ pytest
 pytest-asyncio
 pytest-mock
 Faker
-behavetqdm

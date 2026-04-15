@@ -16,6 +16,7 @@ import redis.asyncio as redis
 
 import aio_pika
 from aio_pika.abc import AbstractRobustConnection
+from huggingface_hub.errors import RemoteEntryNotFoundError
 
 from logger import get_logger
 
@@ -203,6 +204,71 @@ def create_ssl_context(cert_file='server_certificate.pem', verify=True):
     return ssl_context
 
 
+def estimate_max_context(gguf_path: str, vram_bytes: int = 24 * 1024**3) -> int:
+    """
+    Examine a GGUF file, determine its memory requirements, and return the
+    maximum context length (in tokens) that will fit in the given VRAM budget.
+
+    The estimate accounts for:
+      - Model weights (approximated by the file size on disk)
+      - KV cache in FP16: 2 (K+V) × n_layers × n_kv_heads × head_dim × 2 bytes per token
+      - A fixed overhead allowance for activations / framework bookkeeping
+
+    Args:
+        gguf_path:  Path to the GGUF model file.
+        vram_bytes: Total VRAM budget in bytes (default 24 GB).
+
+    Returns:
+        Maximum context length in tokens that fits within the VRAM budget.
+    """
+    from gguf import GGUFReader
+
+    reader = GGUFReader(gguf_path)
+
+    # Discover the architecture prefix (e.g. "qwen3", "llama", …)
+    arch_field = reader.fields.get("general.architecture")
+    arch = bytes(arch_field.parts[-1]).decode() if arch_field else ""
+
+    def _read_int(key: str) -> int:
+        field = reader.fields.get(key)
+        if field is None:
+            raise ValueError(f"GGUF file is missing metadata key: {key}")
+        return int(field.parts[-1][0])
+
+    n_layers   = _read_int(f"{arch}.block_count")
+    n_kv_heads = _read_int(f"{arch}.attention.head_count_kv")
+    key_dim    = _read_int(f"{arch}.attention.key_length")
+    value_dim  = _read_int(f"{arch}.attention.value_length")
+
+    # Weight memory ≈ file size (quantised weights dominate the file)
+    weight_bytes = os.path.getsize(gguf_path)
+
+    # Fixed overhead for activations, scratch buffers, framework state
+    overhead_bytes = 512 * 1024**2  # 512 MB
+
+    available = vram_bytes - weight_bytes - overhead_bytes
+    if available <= 0:
+        raise ValueError(
+            f"Model weights ({weight_bytes / 1024**3:.1f} GB) + overhead "
+            f"exceed VRAM budget ({vram_bytes / 1024**3:.1f} GB)"
+        )
+
+    # KV cache per token (FP16 = 2 bytes per element)
+    #   2 (K and V) × n_layers × n_kv_heads × head_dim × 2 bytes
+    kv_bytes_per_token = 2 * n_layers * n_kv_heads * (key_dim + value_dim) * 2
+
+    max_ctx = available // kv_bytes_per_token
+
+    logger.info(
+        f"GGUF estimate for {os.path.basename(gguf_path)}: "
+        f"weights={weight_bytes / 1024**3:.1f} GB, "
+        f"kv/token={kv_bytes_per_token} B, "
+        f"max_context={max_ctx} tokens "
+        f"(vram budget={vram_bytes / 1024**3:.0f} GB)"
+    )
+    return int(max_ctx)
+
+
 def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name: str = None):
     """
     Load the LLM model for speaker identification.
@@ -237,6 +303,35 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
         )
         tokenizer = AutoTokenizer.from_pretrained(hf_model_name)
 
+        # Some models (e.g. Gemma) ship chat_template as a separate .jinja file
+        # rather than embedding it in tokenizer_config.json. Load it manually if needed.
+        if not getattr(tokenizer, 'chat_template', None):
+            try:
+                from huggingface_hub import hf_hub_download
+                jinja_path = hf_hub_download(hf_model_name, "chat_template.jinja")
+                with open(jinja_path, "r") as f:
+                    tokenizer.chat_template = f.read()
+                logger.info(f"Loaded chat_template.jinja for {hf_model_name}")
+            except RemoteEntryNotFoundError:
+                if "gemma" in hf_model_name.lower():
+                    tokenizer.chat_template = (
+                        "{% for message in messages %}"
+                        "<|turn>{{ message['role'] }}\n{{ message['content'] }}<turn|>\n"
+                        "{% endfor %}"
+                        "{% if add_generation_prompt %}<|turn>model{% endif %}"
+                    )
+                    logger.info(f"Applied built-in Gemma chat template for {hf_model_name}")
+                else:
+                    logger.warning(
+                        f"No chat_template found for {hf_model_name}. "
+                        f"apply_chat_template() may fail for conversation-style prompts."
+                    )
+                    tokenizer.chat_template = (
+                        "{% for message in messages %}"
+                        "{{ message['content'] }}\n"
+                        "{% endfor %}"
+                    )
+
         # Re-enable logging after model load
         if 'LLAMA_LOG_DISABLE' in os.environ:
             del os.environ['LLAMA_LOG_DISABLE']
@@ -250,6 +345,106 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
     except Exception as e:
         logger.error(f"Error loading GGUF model: {e}")
         raise
+
+# Keywords that indicate a thinking/reasoning token
+_THINK_KEYWORDS = frozenset({
+    'think', 'thought', 'thinking',
+    'reason', 'reasoning',
+    'reflect', 'reflection',
+    'internal',
+    'scratchpad',
+    'analysis',
+})
+
+# Patterns that indicate a closing/end token
+_CLOSING_PATTERNS = ('/', 'end_of_', '_end', 'end_', '/>')
+
+
+def _collect_special_tokens(tokenizer) -> list[str]:
+    """Collect all candidate special/added tokens from any tokenizer."""
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    def add(token):
+        if token and isinstance(token, str) and token not in seen:
+            seen.add(token)
+            candidates.append(token)
+
+    for token in getattr(tokenizer, 'additional_special_tokens', []):
+        add(token)
+    if hasattr(tokenizer, 'added_tokens_encoder'):
+        for token in tokenizer.added_tokens_encoder:
+            add(token)
+    if hasattr(tokenizer, 'special_tokens_map'):
+        for value in tokenizer.special_tokens_map.values():
+            if isinstance(value, str):
+                add(value)
+            elif isinstance(value, list):
+                for item in value:
+                    add(item)
+
+    return candidates
+
+
+def _contains_think_keyword(token: str) -> bool:
+    """True if the token relates to thinking/reasoning."""
+    t = token.lower()
+    return any(kw in t for kw in _THINK_KEYWORDS)
+
+
+def _is_closing_token(token: str) -> bool:
+    """True if the token marks the END of a thinking block."""
+    t = token.lower()
+    return any(pattern in t for pattern in _CLOSING_PATTERNS)
+
+
+def find_start_think_token(tokenizer) -> Optional[str]:
+    """
+    Find the opening thinking token for any tokenizer.
+
+    Handles formats such as:
+      <think>  <|begin_of_thought|>  <Thought>  <|thinking|>  <|im_think|>
+    """
+    if tokenizer is None:
+        return None
+    for token in _collect_special_tokens(tokenizer):
+        if _contains_think_keyword(token) and not _is_closing_token(token):
+            return token
+    return None
+
+
+def find_end_think_token(tokenizer) -> Optional[str]:
+    """
+    Find the closing thinking token for any tokenizer.
+
+    Handles formats such as:
+      </think>  <|end_of_thought|>  </Thought>  <|end_thinking|>
+    """
+    if tokenizer is None:
+        return None
+    for token in _collect_special_tokens(tokenizer):
+        if _contains_think_keyword(token) and _is_closing_token(token):
+            return token
+    return None
+
+
+def find_end_think_token_id(tokenizer) -> Optional[int]:
+    """Find the token ID of the closing thinking token."""
+    token_str = find_end_think_token(tokenizer)
+    if token_str is None or tokenizer is None:
+        return None
+    # Fast path: direct lookup in added_tokens_encoder
+    if hasattr(tokenizer, 'added_tokens_encoder') and token_str in tokenizer.added_tokens_encoder:
+        return tokenizer.added_tokens_encoder[token_str]
+    # Fallback: encode and take the last ID
+    try:
+        ids = tokenizer.encode(token_str, add_special_tokens=False)
+        if ids:
+            return ids[-1]
+    except Exception:
+        pass
+    return None
+
 
 def quantized_generate_from_prompt(
     prompt: str,
@@ -299,6 +494,14 @@ def quantized_generate_from_prompt(
                 metakwargs['repeat_penalty'] = repetition_penalty
             for k, v in kwargs.items():
                 metakwargs[k] = v
+
+            # Gemma models need explicit stop sequences to avoid recapitulating the prompt
+            if 'stop' not in metakwargs and hasattr(model, 'model_path'):
+                model_path_lower = (model.model_path or "").lower() if isinstance(model.model_path, str) else ""
+                if "gemma" in model_path_lower:
+                    metakwargs['stop'] = ["<end_of_turn>", "<start_of_turn>"]
+                    logger.info("Added Gemma stop sequences: <end_of_turn>, <start_of_turn>")
+
             stream = model(
                 prompt,
                 echo=False,

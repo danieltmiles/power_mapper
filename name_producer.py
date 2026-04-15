@@ -17,7 +17,7 @@ from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel
 import serialization
 from logger import get_logger
 from sliding_window import SlidingWindow
-from utils import load_config, create_ssl_context, publish_event
+from utils import load_config, create_ssl_context, publish_event, estimate_max_context
 from wire_formats import CleanedWhisperResult, LLMPromptJob, Metaparams
 
 logger = get_logger("name_producer")
@@ -183,8 +183,10 @@ class SpeakerIdentificationProducer:
 
             if sequence_number == total_segments - 1:
                 await self._cleanup_filename_backups(filename)
-
-        return SlidingWindow(MAX_PROMPT_TRANSCRIPT_LENGTH, callback, truncation_percentage=0.3, filename=filename)
+        max_context = 10434  # calculated for Qwen3-32B, the worst case scenario
+        prompt_overhead_chars = 2500  # estimated
+        max_chars = int(((max_context * 4) - (prompt_overhead_chars * 4)) * .9)
+        return SlidingWindow(max_chars, callback, truncation_percentage=0.3, filename=filename)
 
     async def send(
         self,

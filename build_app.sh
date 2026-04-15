@@ -12,23 +12,23 @@ set -euo pipefail
 
 # From: security find-identity -v -p codesigning
 # e.g. "Developer ID Application: Jane Smith (ABCDE12345)"
-SIGNING_IDENTITY=""
+SIGNING_IDENTITY="Daniel Miles (CJ76Q945DP)"
 
 # Your Apple ID (email)
-APPLE_ID=""
+APPLE_ID="daniel.t.miles@gmail.com"
 
 # 10-character Team ID shown in parentheses in the signing identity
-TEAM_ID=""
+TEAM_ID="CJ76Q945DP"
 
 # App-specific password from appleid.apple.com
 # (generate one under Sign-In and Security → App-Specific Passwords)
-APP_SPECIFIC_PASSWORD=""
+APP_SPECIFIC_PASSWORD="goxm-ypab-cyee-iyms"
 
 # ---------------------------------------------------------------
 # Derived / fixed values
 # ---------------------------------------------------------------
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 APP_NAME="PowerMapper"
 DMG="${APP_NAME}-${VERSION}.dmg"
 APP_BUNDLE="dist/${APP_NAME}.app"
@@ -95,34 +95,27 @@ codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 # ---------------------------------------------------------------
 
 echo "==> Creating DMG..."
-dmgbuild \
-    --settings dmgbuild_settings.py \
-    --defines "signing_identity=$SIGNING_IDENTITY" \
-    "$APP_NAME" "$DMG"
+dmgbuild -s dmgbuild_settings.py "$APP_NAME" "$DMG"
 
 echo "==> Signing DMG..."
 codesign --sign "$SIGNING_IDENTITY" "$DMG"
 
 # ---------------------------------------------------------------
-# Notarize
+# Notarize + Staple
+# Uncomment once Apple's notarization service is reliable again.
+# Until then, recipients can right-click → Open to bypass Gatekeeper.
 # ---------------------------------------------------------------
 
-echo "==> Submitting for notarization (this takes several minutes)..."
-xcrun notarytool submit "$DMG" \
+echo "==> Submitting for notarization..."
+SUBMISSION_ID=$(xcrun notarytool submit "$DMG" \
     --keychain-profile "$KEYCHAIN_PROFILE" \
-    --wait
-
-# ---------------------------------------------------------------
-# Staple
-# ---------------------------------------------------------------
-
+    --output-format json | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+echo "    Submission ID: $SUBMISSION_ID"
+xcrun notarytool wait "$SUBMISSION_ID" \
+    --keychain-profile "$KEYCHAIN_PROFILE" \
+    --timeout 7200
 echo "==> Stapling notarization ticket..."
 xcrun stapler staple "$DMG"
-
-# ---------------------------------------------------------------
-# Verify
-# ---------------------------------------------------------------
-
 echo "==> Verifying final DMG..."
 spctl --assess --verbose --type install "$DMG"
 

@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import resource
 import subprocess
 import sys
 import threading
@@ -161,6 +162,19 @@ def compute_sha256(path: str, progress_callback=None) -> str:
             if progress_callback:
                 progress_callback(done, total)
     return digest.hexdigest()
+
+
+def set_background_priority():
+    """Lower the calling process to minimum priority.
+
+    PRIO_DARWIN_BG throttles both CPU and disk I/O when the system is under
+    load, which is stronger than nice alone.  Falls back to nice(19) if the
+    constant is unavailable (shouldn't happen on macOS but is safe to guard).
+    """
+    try:
+        resource.setpriority(resource.PRIO_DARWIN_BG, 0, 1)
+    except AttributeError:
+        os.nice(19)
 
 
 def format_eta(seconds: float) -> str:
@@ -387,6 +401,7 @@ class PowerMapperApp(rumps.App):
             cmd,
             stdout=log_file,
             stderr=log_file,
+            preexec_fn=set_background_priority,
         )
 
         self.caffeinate_process = subprocess.Popen(
@@ -564,8 +579,37 @@ class PowerMapperApp(rumps.App):
         rumps.notification(APP_NAME, title, message)
 
 
+def check_memory_requirement():
+    """Show an error dialog and exit if the system has less than 16 GB RAM."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c"))
+    # sysctl "hw.memsize" returns total physical memory in bytes
+    memsize = ctypes.c_uint64(0)
+    size = ctypes.c_size_t(ctypes.sizeof(memsize))
+    libc.sysctlbyname(b"hw.memsize", ctypes.byref(memsize), ctypes.byref(size), None, 0)
+    total_gb = memsize.value / (1024 ** 3)
+
+    if total_gb < 16:
+        from AppKit import NSAlert, NSAlertStyle, NSApplication, NSRunningApplication
+        NSApplication.sharedApplication()
+        NSRunningApplication.currentApplication().activateWithOptions_(1 << 1)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Insufficient Memory")
+        alert.setInformativeText_(
+            f"Power Mapper requires at least 16 GB of RAM to run the LLM worker.\n"
+            f"This system has {total_gb:.1f} GB."
+        )
+        alert.setAlertStyle_(NSAlertStyle.NSCriticalAlertStyle if hasattr(NSAlertStyle, "NSCriticalAlertStyle") else 2)
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     ensure_support_dir()
     setup_logging()
     log.info("PowerMapper starting")
+    check_memory_requirement()
     PowerMapperApp().run()

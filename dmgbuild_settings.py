@@ -16,7 +16,7 @@ icon_size = 128
 background = "builtin-arrow"   # simple drag-to-install arrow background
 
 files = [
-    os.path.join(os.path.dirname(__file__), "dist", "PowerMapper.app"),
+    os.path.join(os.getcwd(), "dist", "PowerMapper.app"),
 ]
 
 symlinks = {

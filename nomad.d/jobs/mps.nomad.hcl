@@ -88,7 +88,7 @@ EOF
   # Whisper transcription — two CPU workers
   # ---------------------------------------------------------------------------
   group "whisper" {
-    count = 2
+    count = 1
 
     restart {
       attempts = 5
@@ -104,7 +104,7 @@ EOF
         command = "/bin/bash"
         args = [
           "-c",
-          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python whisper_transcription.py ${NOMAD_TASK_DIR}/config.json --device=cpu",
+          "cd /Users/dmiles/code/power_mapper && source venv/bin/activate && exec python whisper_transcription.py ${NOMAD_TASK_DIR}/config.json --device=mps",
         ]
       }
 
@@ -344,7 +344,7 @@ EOF
   # Clean — LLM-powered transcript cleanup
   # ---------------------------------------------------------------------------
   group "clean" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
@@ -405,7 +405,7 @@ EOF
   # Gate — quality check; routes pass/retry
   # ---------------------------------------------------------------------------
   group "gate" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
@@ -475,7 +475,7 @@ EOF
   # Name producer — sliding window speaker identification
   # ---------------------------------------------------------------------------
   group "name-producer" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
@@ -542,7 +542,7 @@ EOF
   # Name consumer — processes identification results
   # ---------------------------------------------------------------------------
   group "name-consumer" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
@@ -608,7 +608,7 @@ EOF
   # Trac — topic, relationship, and context extraction
   # ---------------------------------------------------------------------------
   group "trac" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
@@ -674,7 +674,7 @@ EOF
   # Scribe producer — generates issue descriptions
   # ---------------------------------------------------------------------------
   group "scribe-producer" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
@@ -740,7 +740,7 @@ EOF
   # Scribe consumer — persists issue descriptions to Solr
   # ---------------------------------------------------------------------------
   group "scribe-consumer" {
-    count = 1
+    count = 0
 
     restart {
       attempts = 5
