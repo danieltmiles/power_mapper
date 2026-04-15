@@ -204,7 +204,7 @@ def create_ssl_context(cert_file='server_certificate.pem', verify=True):
     return ssl_context
 
 
-def estimate_max_context(gguf_path: str, vram_bytes: int = 24 * 1024**3) -> int:
+def estimate_max_context(gguf_path: str, vram_bytes: int = 23 * 1024**3) -> int:
     """
     Examine a GGUF file, determine its memory requirements, and return the
     maximum context length (in tokens) that will fit in the given VRAM budget.
@@ -236,6 +236,7 @@ def estimate_max_context(gguf_path: str, vram_bytes: int = 24 * 1024**3) -> int:
         return int(field.parts[-1][0])
 
     n_layers   = _read_int(f"{arch}.block_count")
+    logger.info(f"{n_layers=}")
     n_kv_heads = _read_int(f"{arch}.attention.head_count_kv")
     key_dim    = _read_int(f"{arch}.attention.key_length")
     value_dim  = _read_int(f"{arch}.attention.value_length")
@@ -259,14 +260,21 @@ def estimate_max_context(gguf_path: str, vram_bytes: int = 24 * 1024**3) -> int:
 
     max_ctx = available // kv_bytes_per_token
 
+    # How many layers can we offload to GPU while fitting a target context?
+    target_ctx = 10240
+    kv_per_token_per_layer = 2 * n_kv_heads * (key_dim + value_dim) * 2
+    cost_per_layer = (weight_bytes / n_layers) + (kv_per_token_per_layer * target_ctx)
+    max_layers = min(int((vram_bytes - overhead_bytes) // cost_per_layer), n_layers)
     logger.info(
-        f"GGUF estimate for {os.path.basename(gguf_path)}: "
-        f"weights={weight_bytes / 1024**3:.1f} GB, "
-        f"kv/token={kv_bytes_per_token} B, "
-        f"max_context={max_ctx} tokens "
-        f"(vram budget={vram_bytes / 1024**3:.0f} GB)"
+        f"GGUF estimate for {os.path.basename(gguf_path)}:\n"
+        f"weights={weight_bytes / 1024**3:.1f} GB,\n"
+        f"weight bytes per layer={weight_bytes / n_layers / 1024**2:.1f} MB,\n"
+        f"kv/token={kv_bytes_per_token} B,\n"
+        f"max_context={max_ctx} tokens\n"
+        f"max_layers={max_layers} layers\n"
+        f"(vram budget={vram_bytes / 1024**3:.0f} GB)\n"
     )
-    return int(max_ctx)
+    return int(max_ctx), int(max_layers)
 
 
 def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name: str = None):
@@ -293,10 +301,15 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
 
         # Temporarily suppress llama.cpp warnings
         os.environ['LLAMA_LOG_DISABLE'] = '1'
+        max_ctx, max_layers = estimate_max_context(model_path)
+        if max_ctx < 10240:
+            max_ctx = 10240
+        else:
+            max_layers = -1
         model = Llama(
             model_path=model_path,
-            n_gpu_layers=-1,  # Use all GPU layers
-            n_ctx=10240,  # Context window size
+            n_gpu_layers=max_layers,  # Use all GPU layers
+            n_ctx=max_ctx,  # Context window size
             use_mmap=True,   # Map the model file into memory rather than copying it
             use_mlock=False, # Don't pin pages — let the OS page out unused weights
             verbose=False
@@ -499,8 +512,8 @@ def quantized_generate_from_prompt(
             if 'stop' not in metakwargs and hasattr(model, 'model_path'):
                 model_path_lower = (model.model_path or "").lower() if isinstance(model.model_path, str) else ""
                 if "gemma" in model_path_lower:
-                    metakwargs['stop'] = ["<end_of_turn>", "<start_of_turn>"]
-                    logger.info("Added Gemma stop sequences: <end_of_turn>, <start_of_turn>")
+                    metakwargs['stop'] = ["<turn|>", "<|turn>"]
+                    logger.info("Added Gemma stop sequences: <turn|>, <|turn>")
 
             stream = model(
                 prompt,
