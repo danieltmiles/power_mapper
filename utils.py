@@ -292,7 +292,6 @@ def estimate_max_context(gguf_path: str, vram_bytes: int = None) -> tuple[int, i
     # fudge a little
     max_ctx *= 1.1
 
-
     # How many layers can we offload to GPU while fitting a target context?
     target_ctx = 10240
     kv_per_token_per_layer = 2 * n_kv_heads * (key_dim + value_dim) * 2
@@ -366,6 +365,8 @@ def load_quantized_llm_model(device: str, model_path: str = None, hf_model_name:
                         "{% for message in messages %}"
                         "<|turn>{{ message['role'] }}\n{{ message['content'] }}<turn|>\n"
                         "{% endfor %}"
+                        "<|turn>system\n"
+                        "<|think|><turn|>\n"
                         "{% if add_generation_prompt %}<|turn>model{% endif %}"
                     )
                     logger.info(f"Applied built-in Gemma chat template for {hf_model_name}")
@@ -405,7 +406,7 @@ _THINK_KEYWORDS = frozenset({
 })
 
 # Patterns that indicate a closing/end token
-_CLOSING_PATTERNS = ('/', 'end_of_', '_end', 'end_', '/>')
+_CLOSING_PATTERNS = ('/', 'end_of_', '_end', 'end_', '/>', '|>')
 
 
 def _collect_special_tokens(tokenizer) -> list[str]:
@@ -505,6 +506,7 @@ def quantized_generate_from_prompt(
     top_k: int | None = None,
     min_p: float | None = None,
     repetition_penalty: float = 1.1,
+    thinking_budget: int | None = None,
     **kwargs,
 ) -> str:
     """
@@ -521,6 +523,8 @@ def quantized_generate_from_prompt(
     Returns:
         str: The generated text
     """
+    if thinking_budget is None:
+        thinking_budget = int(max_tokens * .66)
     if model_type == "llamacpp":
         # llama-cpp-python streaming generation - stops naturally on EOS token
         try:
@@ -558,11 +562,45 @@ def quantized_generate_from_prompt(
             )
 
             # Accumulate tokens from the stream
+            start_thinking_token = find_start_think_token(tokenizer)
+            end_thinking_token = find_end_think_token(tokenizer)
+            if not start_thinking_token or not end_thinking_token:
+                raise ValueError("Missing start or end thinking tokens for tokenizer")
+            # find all start indexes
+            in_thinking = False
+            for tok in tokenizer.tokenize(prompt):
+                if start_thinking_token in tok:
+                    in_thinking = True
+                elif end_thinking_token in tok:
+                    in_thinking = False
+            thinking_tokens_generated = 0
             for chunk in stream:
                 # Each chunk has the structure: {'choices': [{'text': '...', 'finish_reason': ...}]}
                 if 'choices' in chunk and len(chunk['choices']) > 0:
                     choice = chunk['choices'][0]
                     token_text = choice.get('text', '')
+                    if start_thinking_token in token_text:
+                        in_thinking = True
+                    elif end_thinking_token in token_text:
+                        in_thinking = False
+                    if in_thinking:
+                        thinking_tokens_generated += 1
+                        if thinking_tokens_generated > thinking_budget:
+                            logger.info(f"Thinking budget exceeded after {thinking_tokens_generated} tokens. ending thinking.")
+                            new_prompt = prompt + generated_text + " thinking budget exceeded " + end_thinking_token
+                            return quantized_generate_from_prompt(
+                                model=model,
+                                prompt=new_prompt,
+                                tokenizer=tokenizer,
+                                model_type=model_type,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                top_p=top_p,
+                                top_k=top_k,
+                                min_p=min_p,
+                                repetition_penalty=repetition_penalty,
+                                **kwargs,
+                            )
                     print(token_text, end='', flush=True)
                     generated_text += token_text
 
@@ -570,7 +608,8 @@ def quantized_generate_from_prompt(
                     finish_reason = choice.get('finish_reason', None)
                     if finish_reason == 'stop':
                         logger.info("EOS token detected, stopping generation.")
-                        break
+                        # prompt_and_generated = prompt + generated_text
+                        # find_end_think_token_id()
                     elif finish_reason == 'length':
                         logger.info("Max tokens reached.")
                         break

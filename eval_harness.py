@@ -881,6 +881,12 @@ async def main(args):
             samples_per_type=args.samples_per_type
         )
     logger.info(f"Selected {len(jobs)} prompts")
+    jobs_log_path = Path("generated_jobs.jsonl")
+    with open(jobs_log_path, "w") as f:
+        f.write("")
+    prompt_writer = AppendFileWriter(jobs_log_path)
+    for i, job in enumerate(jobs):
+        prompt_writer.append({"prompt_id": i, "prompt": job.prompt})
 
     # Phase 1: Run all models
     all_responses: dict[str, dict[int, str]] = {}

@@ -6,6 +6,7 @@ import pytest_mock
 from dataclasses import dataclass
 
 from sliding_window import SlidingWindow, CleanedWhisperResultWrapper
+from utils import find_end_think_token
 from wire_formats import (
     CleanedWhisperResult,
     WhisperResult,
@@ -588,3 +589,9 @@ async def test_no_callback_when_below_max_size_and_not_last_sequence():
     sliding_window = SlidingWindow(max_size=chunk_len + 1, callback=callback, truncation_percentage=0.0)
     await sliding_window.append(seg)
     assert len(fired) == 0
+
+def test_dmiles():
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-31B")
+    tok = find_end_think_token(tokenizer)
+    print(tok)
