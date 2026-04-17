@@ -289,6 +289,9 @@ def estimate_max_context(gguf_path: str, vram_bytes: int = None) -> tuple[int, i
     kv_bytes_per_token = 2 * n_layers * n_kv_heads * (key_dim + value_dim) * 2
 
     max_ctx = available // kv_bytes_per_token
+    # fudge a little
+    max_ctx *= 1.1
+
 
     # How many layers can we offload to GPU while fitting a target context?
     target_ctx = 10240
