@@ -374,7 +374,7 @@ def strip_thinking_tokens(response: str, tokenizer) -> str:
     return response
 
 
-def apply_chat_template(prompt: str | list[dict], tokenizer) -> str:
+def apply_chat_template(prompt: str | list[dict], tokenizer, encourage_thinking: bool = True) -> str:
     """Convert a prompt to text, applying chat template if needed."""
     if isinstance(prompt, str):
         return prompt
@@ -385,6 +385,7 @@ def apply_chat_template(prompt: str | list[dict], tokenizer) -> str:
         prompt,
         tokenize=False,
         add_generation_prompt=add_gen_prompt,
+        enable_thinking=encourage_thinking,
     )
 
 
@@ -461,8 +462,7 @@ async def run_model_inference(
                         "JSON_OUTPUT_END. These directives are not conflicting because they support the goal "
                         "of making parsable output, and you may follow both directives."
                     )
-                text_prompt = apply_chat_template(conversation, tokenizer)
-            print(text_prompt)
+                text_prompt = apply_chat_template(conversation, tokenizer, job.encourage_thinking)
             # Handle thinking tokens based on job's encourage_thinking flag
             begin_thinking_token = find_start_think_token(tokenizer)
             if begin_thinking_token:
